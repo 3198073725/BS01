@@ -1,0 +1,12 @@
+[submodule "backend"]
+	path = backend
+	url = git@github.com:3198073725/BS01-backend.git
+[submodule "web-client"]
+	path = web-client
+	url = git@github.com:3198073725/BS01-web-client.git
+[submodule "admin-console"]
+	path = admin-console
+	url = git@github.com:3198073725/BS01-admin-console.git
+[submodule "MobileApp"]
+	path = MobileApp
+	url = git@github.com:3198073725/BS01-MobileApp.git

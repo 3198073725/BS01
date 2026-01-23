@@ -1,0 +1,22 @@
+[Unit]
+Description=BS01 Admin Console (Vue CLI Dev Server)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/BS01/admin-console
+Environment=NODE_ENV=development
+Environment=BROWSER=none
+Environment=HOST=0.0.0.0
+Environment=PORT=8082
+# 安装依赖（如已安装可注释）
+ExecStart=/usr/bin/npm run serve -- --host 0.0.0.0 --port 8082
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

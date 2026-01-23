@@ -1,0 +1,20 @@
+[Unit]
+Description=BS01 Mobile Metro (React Native Packager)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/BS01/MobileApp
+Environment=NODE_ENV=development
+# 如首次启动未安装依赖，可取消注释下一行
+# ExecStartPre=/usr/bin/npm ci --no-audit --no-fund
+ExecStart=/usr/bin/npm run start -- --host 0.0.0.0 --port 8081 --reset-cache
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
