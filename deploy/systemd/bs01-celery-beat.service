@@ -1,5 +1,5 @@
 [Unit]
-Description=BS01 Django Backend (Gunicorn)
+Description=BS01 Celery Beat Scheduler
 After=network.target
 
 [Service]
@@ -10,7 +10,9 @@ WorkingDirectory=/root/BS01/backend
 Environment=PYTHONUNBUFFERED=1
 Environment=DJANGO_SETTINGS_MODULE=backend.settings
 EnvironmentFile=/root/BS01/backend/.env
-ExecStart=/root/BS01/.venv/bin/gunicorn -c /root/BS01/backend/gunicorn.conf.py backend.wsgi:application
+ExecStart=/root/BS01/.venv/bin/celery -A backend beat -l INFO
+# If you install django-celery-beat, you can switch to database scheduler:
+# ExecStart=/root/BS01/venv/bin/celery -A backend beat -l INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
 Restart=always
 RestartSec=3
 TimeoutStartSec=30
