@@ -8,9 +8,11 @@ User=root
 Group=root
 WorkingDirectory=/root/BS01/MobileApp
 Environment=NODE_ENV=development
+Environment=CI=true
 # 如首次启动未安装依赖，可取消注释下一行
 # ExecStartPre=/usr/bin/npm ci --no-audit --no-fund
-ExecStart=/usr/bin/npm run start -- --host 0.0.0.0 --port 8081 --reset-cache
+# 直接用 CLI 的 start，固定参数，避免交互
+ExecStart=/bin/sh -lc 'exec /usr/bin/npx @react-native-community/cli start --host 0.0.0.0 --port 8081 --no-interactive'
 Restart=always
 RestartSec=3
 StandardOutput=journal

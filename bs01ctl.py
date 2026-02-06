@@ -47,9 +47,10 @@ SERVICES = {
     'admin': 'bs01-admin.service',
     'mobile': 'bs01-mobile.service',
     'celery': 'bs01-celery.service',
+    'celery-transcode': 'bs01-celery-transcode.service',
     'celery-beat': 'bs01-celery-beat.service',
 }
-DEFAULT_TARGETS = ['backend', 'web', 'admin', 'celery', 'celery-beat']
+DEFAULT_TARGETS = ['backend', 'web', 'admin', 'celery', 'celery-transcode', 'celery-beat']
 
 # ------------------------- 工具函数 -------------------------
 
@@ -200,7 +201,7 @@ def cmd_disable(args):
 def cmd_logs(args):
     unit = SERVICES.get(args.target)
     if not unit:
-        print("[错误] 目标应为 backend/web/admin/mobile/celery/celery-beat 之一")
+        print("[错误] 目标应为 backend/web/admin/mobile/celery/celery-transcode/celery-beat 之一")
         raise SystemExit(2)
     journalctl(unit, lines=args.lines, follow=args.follow)
 
@@ -229,6 +230,7 @@ def cmd_setup_services(args):
         SERVICE_DIR / 'bs01-admin.service',
         SERVICE_DIR / 'bs01-mobile.service',
         SERVICE_DIR / 'bs01-celery.service',
+        SERVICE_DIR / 'bs01-celery-transcode.service',
         SERVICE_DIR / 'bs01-celery-beat.service',
     ]
     for f in files:

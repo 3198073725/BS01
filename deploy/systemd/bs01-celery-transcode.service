@@ -1,5 +1,5 @@
 [Unit]
-Description=BS01 Celery Worker (default queue)
+Description=BS01 Celery Worker (transcode queue)
 After=network.target
 
 [Service]
@@ -10,7 +10,7 @@ WorkingDirectory=/root/BS01/backend
 Environment=PYTHONUNBUFFERED=1
 Environment=DJANGO_SETTINGS_MODULE=backend.settings
 EnvironmentFile=/root/BS01/backend/.env
-ExecStart=/root/BS01/.venv/bin/celery -A backend worker -l INFO -Q default -c 4
+ExecStart=/root/BS01/.venv/bin/celery -A backend worker -l INFO -Q transcode -c 1
 Restart=always
 RestartSec=3
 TimeoutStartSec=30
