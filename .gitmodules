@@ -7,6 +7,6 @@
 [submodule "admin-console"]
 	path = admin-console
 	url = git@github.com:3198073725/BS01-admin-console.git
-[submodule "MobileApp"]
-	path = MobileApp
+[submodule "mobile_uniapp"]
+	path = mobile_uniapp
 	url = git@github.com:3198073725/BS01-MobileApp.git
