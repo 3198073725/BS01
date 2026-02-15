@@ -25,7 +25,7 @@ if [[ ! -d "$SRC_DIR" ]]; then
   exit 2
 fi
 
-stop_units=(bs01-gunicorn.service bs01-celery.service bs01-celery-beat.service bs01-web.service bs01-admin.service bs01-mobile.service)
+stop_units=(bs01-gunicorn.service bs01-celery.service bs01-celery-beat.service bs01-web.service bs01-admin.service)
 for u in "${stop_units[@]}"; do
   systemctl stop "$u" 2>/dev/null || true
 done

@@ -54,7 +54,7 @@ fi
 if [[ $SKIP_SYSTEMD -eq 0 ]]; then
   SYS_DIR="/etc/systemd/system"
   to_pack=()
-  for u in bs01-gunicorn.service bs01-web.service bs01-admin.service bs01-mobile.service bs01-celery.service bs01-celery-beat.service; do
+  for u in bs01-gunicorn.service bs01-web.service bs01-admin.service bs01-celery.service bs01-celery-beat.service; do
     [[ -f "$SYS_DIR/$u" ]] && to_pack+=("$u") || true
   done
   if [[ ${#to_pack[@]} -gt 0 ]]; then

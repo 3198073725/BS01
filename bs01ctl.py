@@ -3,11 +3,10 @@
 """
 BS01 项目运维脚本（Python 版）
 
-用途：统一管理后端、两个前端与移动端（Metro）的运行、日志、依赖、迁移、测试与体检。
+用途：统一管理后端与两个前端的运行、日志、依赖、迁移、测试与体检。
 - 后端：Django + Gunicorn（systemd 服务名：bs01-gunicorn）
 - Web 客户端：Vue CLI（systemd 服务名：bs01-web）
 - 管理端：Vue CLI（systemd 服务名：bs01-admin）
-- 移动端：React Native Metro（systemd 服务名：bs01-mobile）
 
 示例：
   python bs01ctl.py status                 # 查看全部服务状态
@@ -45,11 +44,13 @@ SERVICES = {
     'backend': 'bs01-gunicorn.service',
     'web': 'bs01-web.service',
     'admin': 'bs01-admin.service',
-    'mobile': 'bs01-mobile.service',
     'celery': 'bs01-celery.service',
     'celery-transcode': 'bs01-celery-transcode.service',
     'celery-beat': 'bs01-celery-beat.service',
 }
+UNIAPP_ROOT = BASE_DIR / 'mobile_uniapp'
+UNIAPP_DEV_PID = Path('/tmp/bs01_uniapp_dev.pid')
+UNIAPP_DEV_LOG = Path('/tmp/bs01_uniapp_dev.log')
 DEFAULT_TARGETS = ['backend', 'web', 'admin', 'celery', 'celery-transcode', 'celery-beat']
 
 # ------------------------- 工具函数 -------------------------
@@ -198,10 +199,105 @@ def cmd_disable(args):
             print(f"[跳过] 未安装单元：{u}")
 
 
+def _read_pid(pid_path: Path) -> int | None:
+    try:
+        s = pid_path.read_text(encoding='utf-8').strip()
+        if not s:
+            return None
+        return int(s)
+    except Exception:
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def cmd_uniapp_build_h5(args):
+    """构建 uni-app H5 生产包。"""
+    if not UNIAPP_ROOT.exists():
+        print(f"[错误] 未找到 uni-app 源码目录：{UNIAPP_ROOT}")
+        return
+    print("[信息] 正在构建 uni-app H5...")
+    run("npm run build:h5", cwd=UNIAPP_ROOT)
+    print("[成功] uni-app H5 构建完成。产物在 mobile_uniapp/dist/build/h5")
+
+
+def cmd_uniapp_clean(args):
+    """清理 uni-app 构建缓存。"""
+    dist = UNIAPP_ROOT / 'dist'
+    if dist.exists():
+        print(f"[信息] 正在清理 {dist}...")
+        shutil.rmtree(dist)
+        print("[成功] uni-app 缓存已清理。")
+    else:
+        print("[信息] 无需清理，dist 目录不存在。")
+
+
+def cmd_uniapp_dev_start(args):
+    """启动 uni-app H5 开发服务 (后台运行)。"""
+    if not UNIAPP_ROOT.exists():
+        print(f"[错误] 未找到 uni-app 源码目录：{UNIAPP_ROOT}")
+        return
+    
+    print("[信息] 正在停止旧的 uni-app 开发服务...")
+    cmd_uniapp_dev_stop(None)
+    
+    print("[信息] 正在启动 uni-app H5 开发服务...")
+    # 使用 nohup 后台运行 npm run dev:h5
+    # 注意：npm 可能会启动子进程，这里尝试记录 pid
+    cmd = f"nohup npm run dev:h5 >{UNIAPP_DEV_LOG} 2>&1 & echo $! > {UNIAPP_DEV_PID}"
+    run(cmd, cwd=UNIAPP_ROOT)
+    
+    print("[成功] 开发服务已在后台启动。")
+    print(f"[提示] 日志文件：{UNIAPP_DEV_LOG}")
+    print(f"[提示] 默认端口通常为 5173，请查看日志确认。")
+
+
+def cmd_uniapp_dev_stop(args):
+    """停止 uni-app 开发服务。"""
+    pid = _read_pid(UNIAPP_DEV_PID)
+    if not pid:
+        print("[信息] 未发现 uni-app 开发服务 PID 文件。")
+        return
+    
+    if _pid_alive(pid):
+        print(f"[信息] 正在停止 uni-app 开发服务 (pid={pid})...")
+        # 尝试杀掉进程组，因为 npm 会启动子进程
+        run(f"pkill -P {pid} || kill {pid}", check=False)
+        print("[成功] 已发送停止信号。")
+    else:
+        print(f"[信息] 服务进程 (pid={pid}) 已不存在。")
+    
+    try:
+        UNIAPP_DEV_PID.unlink(missing_ok=True)
+    except:
+        pass
+
+
+def cmd_uniapp_dev_status(args):
+    """查看 uni-app 开发服务状态。"""
+    pid = _read_pid(UNIAPP_DEV_PID)
+    if not pid:
+        print("[状态] uni-app 开发服务未运行 (无 PID 文件)。")
+        return
+    
+    if _pid_alive(pid):
+        print(f"[状态] uni-app 开发服务正在运行 (pid={pid})。")
+        print(f"[信息] 最近 10 行日志：")
+        run(f"tail -n 10 {UNIAPP_DEV_LOG}", check=False)
+    else:
+        print(f"[状态] PID 文件存在但进程已退出 (pid={pid})。")
+
+
 def cmd_logs(args):
     unit = SERVICES.get(args.target)
     if not unit:
-        print("[错误] 目标应为 backend/web/admin/mobile/celery/celery-transcode/celery-beat 之一")
+        print("[错误] 目标应为 backend/web/admin/celery/celery-transcode/celery-beat 之一")
         raise SystemExit(2)
     journalctl(unit, lines=args.lines, follow=args.follow)
 
@@ -220,6 +316,9 @@ def cmd_install(args):
             run("npm i --no-audit --no-fund", cwd=BASE_DIR / 'web-client')
         if (BASE_DIR / 'admin-console' / 'package.json').exists():
             run("npm ci --no-audit --no-fund", cwd=BASE_DIR / 'admin-console')
+        if UNIAPP_ROOT.exists():
+            print("[信息] 正在安装 uni-app 依赖...")
+            run("npm i --no-audit --no-fund", cwd=UNIAPP_ROOT)
 
 
 def cmd_setup_services(args):
@@ -228,7 +327,6 @@ def cmd_setup_services(args):
         SERVICE_DIR / 'bs01-gunicorn.service',
         SERVICE_DIR / 'bs01-web.service',
         SERVICE_DIR / 'bs01-admin.service',
-        SERVICE_DIR / 'bs01-mobile.service',
         SERVICE_DIR / 'bs01-celery.service',
         SERVICE_DIR / 'bs01-celery-transcode.service',
         SERVICE_DIR / 'bs01-celery-beat.service',
@@ -279,7 +377,6 @@ def cmd_doctor(args):
     print("\n[信息] 检查端口连通性...")
     targets = [
         ("后端", "127.0.0.1", 8000),
-        ("Mobile", "127.0.0.1", 8081),
         ("Web", "127.0.0.1", 8080),
         ("Admin", "127.0.0.1", 8082),
     ]
@@ -476,6 +573,11 @@ def interactive_menu():
         print("10) 收集静态文件")
         print("11) 运行测试")
         print("12) 体检")
+        print("13) 构建 uni-app H5 生产包")
+        print("14) 清理 uni-app 缓存")
+        print("15) 启动 uni-app 开发服务 (H5)")
+        print("16) 停止 uni-app 开发服务")
+        print("17) 查看 uni-app 开发服务状态")
         print("0) 退出")
         choice = _prompt("请选择编号", "1")
 
@@ -488,19 +590,19 @@ def interactive_menu():
         if num == 0:
             break
         elif num == 1:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'celery', 'celery-beat'], 'all')
             cmd_status(argparse.Namespace(targets=[tgt]))
         elif num == 2:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'celery', 'celery-beat'], 'all')
             cmd_start(argparse.Namespace(targets=[tgt]))
         elif num == 3:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'celery', 'celery-beat'], 'all')
             cmd_stop(argparse.Namespace(targets=[tgt]))
         elif num == 4:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'celery', 'celery-beat'], 'all')
             cmd_restart(argparse.Namespace(targets=[tgt]))
         elif num == 5:
-            tgt = _choice("目标服务", ['backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'backend')
+            tgt = _choice("目标服务", ['backend', 'web', 'admin', 'celery', 'celery-beat'], 'backend')
             lines = _prompt("显示日志行数", "200")
             try:
                 n = int(lines)
@@ -512,7 +614,7 @@ def interactive_menu():
             skip_fe = not _yesno("安装前端依赖?", 'y')
             cmd_install(argparse.Namespace(skip_frontend=skip_fe))
         elif num == 7:
-            en = _yesno("安装后是否启用并启动后端、前端与 Celery? (mobile 不默认启用)", 'n')
+            en = _yesno("安装后是否启用并启动后端、前端与 Celery?", 'n')
             cmd_setup_services(argparse.Namespace(enable=en))
         elif num == 8:
             cmd_migrate(argparse.Namespace())
@@ -526,6 +628,16 @@ def interactive_menu():
             cmd_test(argparse.Namespace(label=label, keepdb=keep))
         elif num == 12:
             cmd_doctor(argparse.Namespace())
+        elif num == 13:
+            cmd_uniapp_build_h5(argparse.Namespace())
+        elif num == 14:
+            cmd_uniapp_clean(argparse.Namespace())
+        elif num == 15:
+            cmd_uniapp_dev_start(argparse.Namespace())
+        elif num == 16:
+            cmd_uniapp_dev_stop(argparse.Namespace())
+        elif num == 17:
+            cmd_uniapp_dev_status(argparse.Namespace())
         else:
             print("[提示] 无效编号，请重试。")
 
@@ -538,7 +650,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 服务控制
     for name in ('status', 'start', 'stop', 'restart', 'enable', 'disable'):
-        sp = sub.add_parser(name, help=f"{name} 服务：backend/web/admin/mobile/celery/celery-beat/all")
+        sp = sub.add_parser(name, help=f"{name} 服务：backend/web/admin/celery/celery-beat/all")
         sp.add_argument('targets', nargs='*', help="目标服务，默认 all")
         sp.set_defaults(func=globals()[f"cmd_{name}"])
 
@@ -546,7 +658,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_reload)
 
     sp = sub.add_parser('logs', help='查看服务日志（使用 journalctl）')
-    sp.add_argument('target', choices=['backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], help='目标服务')
+    sp.add_argument('target', choices=['backend', 'web', 'admin', 'celery', 'celery-beat'], help='目标服务')
     sp.add_argument('-n', '--lines', type=int, default=200, help='显示行数，默认 200')
     sp.add_argument('-f', '--follow', action='store_true', help='持续跟随')
     sp.set_defaults(func=cmd_logs)
@@ -577,6 +689,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser('doctor', help='体检（状态/端口/文件）')
     sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser('uniapp-build-h5', help='构建 uni-app H5 生产包')
+    sp.set_defaults(func=cmd_uniapp_build_h5)
+
+    sp = sub.add_parser('uniapp-clean', help='清理 uni-app 构建产物')
+    sp.set_defaults(func=cmd_uniapp_clean)
+
+    sp = sub.add_parser('uniapp-dev-start', help='启动 uni-app 开发服务 (后台)')
+    sp.set_defaults(func=cmd_uniapp_dev_start)
+
+    sp = sub.add_parser('uniapp-dev-stop', help='停止 uni-app 开发服务')
+    sp.set_defaults(func=cmd_uniapp_dev_stop)
+
+    sp = sub.add_parser('uniapp-dev-status', help='查看 uni-app 开发服务状态')
+    sp.set_defaults(func=cmd_uniapp_dev_status)
 
     return p
 
