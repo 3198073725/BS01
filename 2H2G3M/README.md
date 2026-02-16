@@ -95,6 +95,16 @@ sudo apt install -y \
   ca-certificates curl git
 ```
 
+2.2.2 安装 Python 3.12（Django 6 需要 Python >= 3.12）：
+
+```bash
+sudo apt install -y software-properties-common
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install -y python3.12 python3.12-venv python3.12-dev
+python3.12 --version
+```
+
 2.2.1 验证关键命令存在：
 
 ```bash
@@ -261,7 +271,7 @@ grep -E '^DB_(ENGINE|NAME|USER|PASSWORD|HOST|PORT)=' /root/BS01/backend/.env
 7.1 创建 venv：
 
 ```bash
-python3 -m venv /root/BS01/.venv
+python3.12 -m venv /root/BS01/.venv
 ```
 
 7.2 升级 pip：
