@@ -1,0 +1,19 @@
+[Unit]
+Description=BS01 Celery Worker (default queue) - 2C2G tuned
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/BS01/backend
+Environment=PYTHONUNBUFFERED=1
+Environment=DJANGO_SETTINGS_MODULE=backend.settings
+EnvironmentFile=/root/BS01/backend/.env
+ExecStart=/root/BS01/.venv/bin/celery -A backend worker -l INFO -Q default -c 1
+Restart=always
+RestartSec=3
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
