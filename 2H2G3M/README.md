@@ -471,12 +471,39 @@ sudo journalctl -u bs01-gunicorn -f
 - 优先看 Gunicorn 日志：`journalctl -u bs01-gunicorn -n 200 --no-pager`
 - 看系统内存：`free -h`
 
+14.1.1 Gunicorn 启动失败，日志提示 `No module named 'whitenoise'`：
+
+```bash
+/root/BS01/.venv/bin/pip install -r /root/BS01/requirements.txt
+sudo systemctl restart bs01-gunicorn
+```
+
 14.2 Celery 抢占资源：
 - 2C2G 建议默认只启用 `bs01-celery`，并保持 `-c 1`
 - 转码服务 `bs01-celery-transcode` 建议按需手动启用：
 
 ```bash
 sudo systemctl enable --now bs01-celery-transcode
+```
+
+14.2.1 Celery 启动失败，日志提示 `No module named '${REDIS_URL}'`：
+
+这是因为 systemd 的 `EnvironmentFile` **不会展开** `.env` 里的 `${REDIS_URL}` 这类变量引用。
+
+请在 `/root/BS01/backend/.env` 中将：
+
+- `CELERY_BROKER_URL=${REDIS_URL}`
+- `CELERY_RESULT_BACKEND=${REDIS_URL}`
+
+改为显式值，例如：
+
+- `CELERY_BROKER_URL=redis://127.0.0.1:6379/0`
+- `CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/0`
+
+然后重启：
+
+```bash
+sudo systemctl restart bs01-celery
 ```
 
 14.3 上传大文件失败：
