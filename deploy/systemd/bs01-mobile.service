@@ -1,0 +1,21 @@
+[Unit]
+Description=BS01 Mobile UniApp (H5 Dev Server)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/BS01/mobile_uniapp
+Environment=NODE_ENV=development
+Environment=BROWSER=none
+Environment=HOST=0.0.0.0
+Environment=PORT=5173
+ExecStart=/usr/bin/npm run dev:h5 -- --host 0.0.0.0 --port 5173
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

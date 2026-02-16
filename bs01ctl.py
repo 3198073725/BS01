@@ -44,6 +44,7 @@ SERVICES = {
     'backend': 'bs01-gunicorn.service',
     'web': 'bs01-web.service',
     'admin': 'bs01-admin.service',
+    'mobile': 'bs01-mobile.service',
     'celery': 'bs01-celery.service',
     'celery-transcode': 'bs01-celery-transcode.service',
     'celery-beat': 'bs01-celery-beat.service',
@@ -51,7 +52,7 @@ SERVICES = {
 UNIAPP_ROOT = BASE_DIR / 'mobile_uniapp'
 UNIAPP_DEV_PID = Path('/tmp/bs01_uniapp_dev.pid')
 UNIAPP_DEV_LOG = Path('/tmp/bs01_uniapp_dev.log')
-DEFAULT_TARGETS = ['backend', 'web', 'admin', 'celery', 'celery-transcode', 'celery-beat']
+DEFAULT_TARGETS = ['backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat']
 
 # ------------------------- 工具函数 -------------------------
 
@@ -297,7 +298,7 @@ def cmd_uniapp_dev_status(args):
 def cmd_logs(args):
     unit = SERVICES.get(args.target)
     if not unit:
-        print("[错误] 目标应为 backend/web/admin/celery/celery-transcode/celery-beat 之一")
+        print("[错误] 目标应为 backend/web/admin/mobile/celery/celery-transcode/celery-beat 之一")
         raise SystemExit(2)
     journalctl(unit, lines=args.lines, follow=args.follow)
 
@@ -327,6 +328,7 @@ def cmd_setup_services(args):
         SERVICE_DIR / 'bs01-gunicorn.service',
         SERVICE_DIR / 'bs01-web.service',
         SERVICE_DIR / 'bs01-admin.service',
+        SERVICE_DIR / 'bs01-mobile.service',
         SERVICE_DIR / 'bs01-celery.service',
         SERVICE_DIR / 'bs01-celery-transcode.service',
         SERVICE_DIR / 'bs01-celery-beat.service',
@@ -379,6 +381,7 @@ def cmd_doctor(args):
         ("后端", "127.0.0.1", 8000),
         ("Web", "127.0.0.1", 8080),
         ("Admin", "127.0.0.1", 8082),
+        ("移动端", "127.0.0.1", 5173),
     ]
     for name, host, port in targets:
         try:
@@ -590,19 +593,19 @@ def interactive_menu():
         if num == 0:
             break
         elif num == 1:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
             cmd_status(argparse.Namespace(targets=[tgt]))
         elif num == 2:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
             cmd_start(argparse.Namespace(targets=[tgt]))
         elif num == 3:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
             cmd_stop(argparse.Namespace(targets=[tgt]))
         elif num == 4:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
             cmd_restart(argparse.Namespace(targets=[tgt]))
         elif num == 5:
-            tgt = _choice("目标服务", ['backend', 'web', 'admin', 'celery', 'celery-beat'], 'backend')
+            tgt = _choice("目标服务", ['backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'backend')
             lines = _prompt("显示日志行数", "200")
             try:
                 n = int(lines)
@@ -650,7 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 服务控制
     for name in ('status', 'start', 'stop', 'restart', 'enable', 'disable'):
-        sp = sub.add_parser(name, help=f"{name} 服务：backend/web/admin/celery/celery-beat/all")
+        sp = sub.add_parser(name, help=f"{name} 服务：backend/web/admin/mobile/celery/celery-beat/all")
         sp.add_argument('targets', nargs='*', help="目标服务，默认 all")
         sp.set_defaults(func=globals()[f"cmd_{name}"])
 
@@ -658,7 +661,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_reload)
 
     sp = sub.add_parser('logs', help='查看服务日志（使用 journalctl）')
-    sp.add_argument('target', choices=['backend', 'web', 'admin', 'celery', 'celery-beat'], help='目标服务')
+    sp.add_argument('target', choices=['backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], help='目标服务')
     sp.add_argument('-n', '--lines', type=int, default=200, help='显示行数，默认 200')
     sp.add_argument('-f', '--follow', action='store_true', help='持续跟随')
     sp.set_defaults(func=cmd_logs)
