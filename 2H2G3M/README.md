@@ -55,6 +55,9 @@ curl -4 ifconfig.me || true
 <服务器公网IP>  web.bs01.local
 <服务器公网IP>  admin.bs01.local
 <服务器公网IP>  api.bs01.local
+117.72.192.70  web.bs01.local
+117.72.192.70  admin.bs01.local
+117.72.192.70  api.bs01.local
 ```
 
 1.3 验证解析是否生效（在你自己的电脑上执行）：
