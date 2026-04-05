@@ -13,11 +13,12 @@ if command -v apt-get >/dev/null 2>&1; then
   apt-get update
   apt-get install -y curl ca-certificates gnupg lsb-release software-properties-common
   apt-get install -y python3-venv python3-dev build-essential git ffmpeg redis-server postgresql postgresql-contrib libpq-dev iproute2 net-tools tar xz-utils
-  if ! command -v node >/dev/null 2>&1 || [[ "$(node -v 2>/dev/null || true)" != "$NODE_VERSION" ]]; then
+  if ! command -v node >/dev/null 2>&1; then
     curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
     apt-get install -y nodejs
   fi
-  if [[ "$(node -v 2>/dev/null || true)" != "$NODE_VERSION" ]]; then
+  current_version=$(node -v 2>/dev/null || echo "")
+  if [[ "$current_version" != "$NODE_VERSION" ]]; then
     tmpdir="$(mktemp -d)"
     cd "$tmpdir"
     curl -fsSLO "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz"
