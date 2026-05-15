@@ -4,14 +4,14 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-Group=root
-WorkingDirectory=/root/BS01/mobile_uniapp
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__PROJECT_ROOT__/mobile_uniapp
 Environment=NODE_ENV=development
 Environment=BROWSER=none
 Environment=HOST=0.0.0.0
 Environment=PORT=5173
-ExecStart=/usr/bin/npm run dev:h5 -- --host 0.0.0.0 --port 5173
+ExecStart=__NPM_BIN__ run dev:h5 -- --host 0.0.0.0 --port 5173
 Restart=always
 RestartSec=3
 StandardOutput=journal

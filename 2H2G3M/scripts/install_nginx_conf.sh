@@ -18,7 +18,10 @@ fi
 
 cp "$NG_SRC" "$NG_AVAIL"
 ln -sf "$NG_AVAIL" "$NG_ENABLED"
+rm -f /etc/nginx/sites-enabled/default
 
 nginx -t
 
-echo "[ok] nginx conf installed. run: systemctl reload nginx"
+systemctl reload nginx
+
+echo "[ok] nginx conf installed and nginx reloaded"

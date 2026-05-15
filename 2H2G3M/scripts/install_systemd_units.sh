@@ -10,7 +10,7 @@ if [[ ${EUID:-0} -ne 0 ]]; then
   exit 1
 fi
 
-for f in bs01-gunicorn.service bs01-celery.service bs01-celery-transcode.service; do
+for f in bs01-gunicorn.service bs01-celery.service bs01-celery-transcode.service bs01-celery-beat.service; do
   if [[ ! -f "$UNIT_SRC/$f" ]]; then
     echo "missing unit: $UNIT_SRC/$f" >&2
     exit 2
@@ -20,4 +20,4 @@ done
 
 systemctl daemon-reload
 
-echo "[ok] units installed. You can run: systemctl enable --now bs01-gunicorn bs01-celery"
+echo "[ok] units installed. You can run: systemctl enable --now bs01-gunicorn bs01-celery bs01-celery-transcode bs01-celery-beat"

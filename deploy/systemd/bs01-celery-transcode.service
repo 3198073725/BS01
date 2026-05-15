@@ -4,13 +4,13 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-Group=root
-WorkingDirectory=/root/BS01/backend
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__PROJECT_ROOT__/backend
 Environment=PYTHONUNBUFFERED=1
 Environment=DJANGO_SETTINGS_MODULE=backend.settings
-EnvironmentFile=/root/BS01/backend/.env
-ExecStart=/root/BS01/.venv/bin/celery -A backend worker -l INFO -Q transcode -c 1 --max-tasks-per-child=10
+EnvironmentFile=__PROJECT_ROOT__/backend/.env
+ExecStart=__PROJECT_ROOT__/.venv/bin/celery -A backend worker -l INFO -Q transcode -c 1 --max-tasks-per-child=10
 Restart=always
 RestartSec=3
 TimeoutStartSec=30

@@ -1,5 +1,5 @@
 [Unit]
-Description=BS01 Celery Worker (default queue) - 2C2G tuned
+Description=BS01 Celery Beat Scheduler - 2C2G tuned
 After=network.target
 
 [Service]
@@ -10,7 +10,7 @@ WorkingDirectory=/root/BS01/backend
 Environment=PYTHONUNBUFFERED=1
 Environment=DJANGO_SETTINGS_MODULE=backend.settings
 EnvironmentFile=/root/BS01/backend/.env
-ExecStart=/root/BS01/.venv/bin/celery -A backend worker -n bs01-default@%H -l INFO -Q default -c 1 --prefetch-multiplier=1 --max-tasks-per-child=100
+ExecStart=/root/BS01/.venv/bin/celery -A backend beat -l INFO
 Restart=always
 RestartSec=3
 TimeoutStartSec=30

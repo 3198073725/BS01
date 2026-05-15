@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="/root/BS01"
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=512}"
 
 echo "[web-client] build"
 cd "$ROOT/web-client"

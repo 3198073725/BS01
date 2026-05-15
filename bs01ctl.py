@@ -3,10 +3,9 @@
 """
 BS01 项目运维脚本（Python 版）
 
-用途：统一管理后端与两个前端的运行、日志、依赖、迁移、测试与体检。
-- 后端：Django + Gunicorn（systemd 服务名：bs01-gunicorn）
-- Web 客户端：Vue CLI（systemd 服务名：bs01-web）
-- 管理端：Vue CLI（systemd 服务名：bs01-admin）
+用途：统一管理后端与前端的运行、日志、依赖、迁移、测试与体检。
+- 生产服务：Django + Gunicorn + Celery（systemd）
+- 开发辅助：Web/Admin/Mobile 前端 dev server（可选 systemd）
 
 示例：
   python bs01ctl.py status                 # 查看全部服务状态
@@ -15,9 +14,10 @@ BS01 项目运维脚本（Python 版）
   python bs01ctl.py install                # 安装后端与前端依赖
   python bs01ctl.py migrate                # 执行数据库迁移（PostgreSQL）
   python bs01ctl.py test apps --keepdb     # 运行测试（使用 pg 测试库）
-  python bs01ctl.py doctor                 # 体检：服务与端口基本检查
+  python bs01ctl.py doctor                 # 体检：默认检查生产服务
+  python bs01ctl.py doctor --include-frontend-dev  # 附加检查前端开发服务
 
-注意：本脚本假定运行路径为 /root/BS01 且以 root 运行；若非 root，将尝试使用 sudo。
+注意：本脚本默认以当前仓库根目录为项目根；涉及 systemd 的操作通常需要 root 权限，若非 root 将尝试使用 sudo。
 """
 
 import argparse
@@ -29,6 +29,8 @@ import socket
 import shutil
 import http.client
 import re
+import pwd
+import grp
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -39,6 +41,7 @@ MANAGE_PY = BASE_DIR / 'backend' / 'manage.py'
 ENV_FILE = BASE_DIR / 'backend' / '.env'
 SYSTEMD_DIR = Path('/etc/systemd/system')
 SERVICE_DIR = BASE_DIR / 'deploy' / 'systemd'
+DEV_SERVICE_DIR = BASE_DIR / 'deploy' / 'systemd-dev'
 
 SERVICES = {
     'backend': 'bs01-gunicorn.service',
@@ -49,10 +52,21 @@ SERVICES = {
     'celery-transcode': 'bs01-celery-transcode.service',
     'celery-beat': 'bs01-celery-beat.service',
 }
+PRODUCTION_TARGETS = ['backend', 'celery', 'celery-transcode', 'celery-beat']
+DEV_TARGETS = ['web', 'admin', 'mobile']
+SERVICE_FILES = {
+    'backend': SERVICE_DIR / 'bs01-gunicorn.service',
+    'celery': SERVICE_DIR / 'bs01-celery.service',
+    'celery-transcode': SERVICE_DIR / 'bs01-celery-transcode.service',
+    'celery-beat': SERVICE_DIR / 'bs01-celery-beat.service',
+    'web': DEV_SERVICE_DIR / 'bs01-web.service',
+    'admin': DEV_SERVICE_DIR / 'bs01-admin.service',
+    'mobile': DEV_SERVICE_DIR / 'bs01-mobile.service',
+}
 UNIAPP_ROOT = BASE_DIR / 'mobile_uniapp'
 UNIAPP_DEV_PID = Path('/tmp/bs01_uniapp_dev.pid')
 UNIAPP_DEV_LOG = Path('/tmp/bs01_uniapp_dev.log')
-DEFAULT_TARGETS = ['backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat']
+DEFAULT_TARGETS = PRODUCTION_TARGETS
 
 # ------------------------- 工具函数 -------------------------
 
@@ -94,6 +108,89 @@ def ensure_paths():
         raise SystemExit(1)
     if not ENV_FILE.exists():
         print("[警告] 未找到环境文件 .env：", ENV_FILE)
+
+
+def default_service_user() -> str:
+    try:
+        return pwd.getpwuid(BASE_DIR.stat().st_uid).pw_name
+    except Exception:
+        return 'bs01'
+
+
+def default_service_group() -> str:
+    try:
+        return grp.getgrgid(BASE_DIR.stat().st_gid).gr_name
+    except Exception:
+        return default_service_user()
+
+
+def default_npm_bin() -> str:
+    return shutil.which('npm') or '/usr/bin/npm'
+
+
+def build_service_context(args=None, *, project_root: Path | None = None, service_user: str | None = None,
+                          service_group: str | None = None, npm_bin: str | None = None) -> dict[str, str]:
+    project_root = Path(project_root or getattr(args, 'project_root', BASE_DIR)).resolve()
+    service_user = service_user or getattr(args, 'service_user', None) or default_service_user()
+    service_group = service_group or getattr(args, 'service_group', None) or default_service_group()
+    npm_bin = npm_bin or getattr(args, 'npm_bin', None) or default_npm_bin()
+    return {
+        'project_root': str(project_root),
+        'service_user': service_user,
+        'service_group': service_group,
+        'npm_bin': npm_bin,
+    }
+
+
+def render_service_template(template_path: Path, context: dict[str, str], include_metadata: bool = False) -> str:
+    template_path = template_path.resolve()
+    text = template_path.read_text(encoding='utf-8')
+    replacements = {
+        '__PROJECT_ROOT__': context['project_root'],
+        '__SERVICE_USER__': context['service_user'],
+        '__SERVICE_GROUP__': context['service_group'],
+        '__NPM_BIN__': context['npm_bin'],
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    if not include_metadata:
+        return text
+
+    try:
+        rel = template_path.relative_to(BASE_DIR)
+    except ValueError:
+        rel = template_path.name
+    header = [
+        f"# Managed by bs01ctl.py from {rel}",
+        f"# ProjectRoot={context['project_root']}",
+        f"# ServiceUser={context['service_user']}",
+        f"# ServiceGroup={context['service_group']}",
+        f"# NpmBin={context['npm_bin']}",
+        "",
+    ]
+    return "\n".join(header) + text
+
+
+def read_installed_service_context(systemd_path: Path) -> dict[str, str] | None:
+    try:
+        text = systemd_path.read_text(encoding='utf-8')
+    except Exception:
+        return None
+
+    meta = {}
+    patterns = {
+        'project_root': r'^# ProjectRoot=(.+)$',
+        'service_user': r'^# ServiceUser=(.+)$',
+        'service_group': r'^# ServiceGroup=(.+)$',
+        'npm_bin': r'^# NpmBin=(.+)$',
+    }
+    for key, pattern in patterns.items():
+        m = re.search(pattern, text, re.MULTILINE)
+        if m:
+            meta[key] = m.group(1).strip()
+    if len(meta) != len(patterns):
+        return None
+    return meta
 
 
 # ------------------------- 交互辅助 -------------------------
@@ -148,7 +245,7 @@ def cmd_status(args):
         if unit_installed(u):
             systemctl(f"status {u} --no-pager", check=False)
         else:
-            print(f"[跳过] 未安装单元：{u}（可执行 'python3 bs01ctl.py setup-services --enable' 安装启用）")
+            print(f"[跳过] 未安装单元：{u}（可执行 'python3 bs01ctl.py setup-services' 安装生产单元；前端开发单元需加 --include-frontend-dev）")
 
 
 def cmd_start(args):
@@ -157,7 +254,7 @@ def cmd_start(args):
         if unit_installed(u):
             systemctl(f"enable --now {u}", check=False)
         else:
-            print(f"[跳过] 未安装单元：{u}（可执行 'python3 bs01ctl.py setup-services --enable' 安装启用）")
+            print(f"[跳过] 未安装单元：{u}（可执行 'python3 bs01ctl.py setup-services' 安装生产单元；前端开发单元需加 --include-frontend-dev）")
 
 
 def cmd_stop(args):
@@ -324,27 +421,35 @@ def cmd_install(args):
 
 def cmd_setup_services(args):
     """安装/更新 systemd 单元并重载。"""
-    files = [
-        SERVICE_DIR / 'bs01-gunicorn.service',
-        SERVICE_DIR / 'bs01-web.service',
-        SERVICE_DIR / 'bs01-admin.service',
-        SERVICE_DIR / 'bs01-mobile.service',
-        SERVICE_DIR / 'bs01-celery.service',
-        SERVICE_DIR / 'bs01-celery-transcode.service',
-        SERVICE_DIR / 'bs01-celery-beat.service',
-    ]
+    context = build_service_context(args)
+    targets = list(PRODUCTION_TARGETS)
+    if args.include_frontend_dev:
+        targets.extend(DEV_TARGETS)
+    files = [SERVICE_FILES[t] for t in targets]
     for f in files:
         if not f.exists():
             print("[警告] 未找到服务文件：", f)
             continue
         dst = SYSTEMD_DIR / f.name
-        cmd = f"cp {shlex.quote(str(f))} {shlex.quote(str(dst))}"
-        if not is_root():
-            cmd = f"sudo {cmd}"
-        run(cmd)
+        rendered = render_service_template(f, context, include_metadata=True)
+        tmp = BASE_DIR / '.tmp' / f.name
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(rendered, encoding='utf-8')
+        try:
+            cmd = f"install -m 0644 {shlex.quote(str(tmp))} {shlex.quote(str(dst))}"
+            if not is_root():
+                cmd = f"sudo {cmd}"
+            run(cmd)
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
     systemctl("daemon-reload")
     if args.enable:
         cmd_start(argparse.Namespace(targets=['all']))
+        if args.include_frontend_dev:
+            cmd_start(argparse.Namespace(targets=DEV_TARGETS))
 
 
 def cmd_migrate(args):
@@ -370,25 +475,34 @@ def cmd_test(args):
 
 
 def cmd_doctor(args):
-    """基本体检：服务状态 + 端口连通性 + 关键文件检查。"""
+    """基本体检：默认检查生产服务，可选附加前端开发服务。"""
+    include_frontend_dev = bool(getattr(args, 'include_frontend_dev', False))
+    status_targets = ['all']
+    if include_frontend_dev:
+        status_targets = ['all'] + DEV_TARGETS
     print("[信息] 检查服务状态...")
-    cmd_status(argparse.Namespace(targets=['all']))
+    cmd_status(argparse.Namespace(targets=status_targets))
     print("\n[信息] 检查关键文件...")
     for p in [VENV_PY, MANAGE_PY, ENV_FILE]:
         print("  ✅ 存在" if p.exists() else "  ❌ 不存在", "-", p)
     print("\n[信息] 检查端口连通性...")
     targets = [
         ("后端", "127.0.0.1", 8000),
-        ("Web", "127.0.0.1", 8080),
-        ("Admin", "127.0.0.1", 8082),
-        ("移动端", "127.0.0.1", 5173),
     ]
+    if include_frontend_dev:
+        targets.extend([
+            ("Web", "127.0.0.1", 8080),
+            ("Admin", "127.0.0.1", 8082),
+            ("移动端", "127.0.0.1", 5173),
+        ])
     for name, host, port in targets:
         try:
             with socket.create_connection((host, port), timeout=1.5):
                 print(f"  ✅ {name} {host}:{port} 可连接")
         except OSError as e:
             print(f"  ❌ {name} {host}:{port} 不可用：{e}")
+    if not include_frontend_dev:
+        print("  ℹ️ 前端开发端口检查默认跳过；如需检查 8080/8082/5173，请附加 --include-frontend-dev")
 
     # Show who occupies gunicorn bind port (from config)
     try:
@@ -482,53 +596,56 @@ def cmd_doctor(args):
         else:
             print(f"  ✅ 预检通过（Origin={origin}，ACAO={acao}，Methods={acam or '-'}，Headers={acah or '-'}）")
 
-    for og in ("http://127.0.0.1:8082", "http://localhost:8082"):
-        _cors_preflight(og)
+    if include_frontend_dev:
+        for og in ("http://127.0.0.1:8082", "http://localhost:8082"):
+            _cors_preflight(og)
 
-    print("\n[信息] Admin 前端编译状态检测（读取 journalctl）...")
-    admin_unit = SERVICES.get('admin')
-    if admin_unit and unit_installed(admin_unit):
-        cmd = ["journalctl", "-u", admin_unit, "-n", "200", "--no-pager"]
-        if not is_root():
-            cmd = ["sudo"] + cmd
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            logs = (proc.stdout or "") + (proc.stderr or "")
-        except Exception as e:
-            logs = ""
-            print(f"  ⚠️ 读取日志失败：{e}")
+        print("\n[信息] Admin 前端编译状态检测（读取 journalctl）...")
+        admin_unit = SERVICES.get('admin')
+        if admin_unit and unit_installed(admin_unit):
+            cmd = ["journalctl", "-u", admin_unit, "-n", "200", "--no-pager"]
+            if not is_root():
+                cmd = ["sudo"] + cmd
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                logs = (proc.stdout or "") + (proc.stderr or "")
+            except Exception as e:
+                logs = ""
+                print(f"  ⚠️ 读取日志失败：{e}")
 
-        low = logs.lower()
-        if not logs.strip():
-            print("  ⚠️ 无日志输出，可能服务未启动或日志被轮转。")
-        elif "failed to compile" in low or "module not found" in low or re.search(r"error in \\S+", low):
-            print("  ❌ 检测到编译错误（包含 'Failed to compile'/'Module not found' 等关键字）。")
-        elif "compiled with warnings" in low:
-            print("  ⚠️ 已编译但存在警告（Compiled with warnings）。")
-        elif "compiled successfully" in low:
-            print("  ✅ 已编译成功（Compiled successfully）。")
+            low = logs.lower()
+            if not logs.strip():
+                print("  ⚠️ 无日志输出，可能服务未启动或日志被轮转。")
+            elif "failed to compile" in low or "module not found" in low or re.search(r"error in \\S+", low):
+                print("  ❌ 检测到编译错误（包含 'Failed to compile'/'Module not found' 等关键字）。")
+            elif "compiled with warnings" in low:
+                print("  ⚠️ 已编译但存在警告（Compiled with warnings）。")
+            elif "compiled successfully" in low:
+                print("  ✅ 已编译成功（Compiled successfully）。")
+            else:
+                print("  ℹ️ 未检测到显著的编译状态关键字（可能仍在编译中或日志未包含状态行）。")
+            try:
+                net_origins: list[str] = []
+                for line in logs.splitlines():
+                    s = line.strip()
+                    if 'Network' in s and 'http://' in s:
+                        m = re.search(r"(http://[A-Za-z0-9\.-]+:\\d+)", s)
+                        if m:
+                            og = m.group(1)
+                            if og not in net_origins:
+                                net_origins.append(og)
+                for og in net_origins:
+                    print(f"  尝试对 Network Origin 进行预检：{og}")
+                    _cors_preflight(og)
+            except Exception:
+                pass
         else:
-            print("  ℹ️ 未检测到显著的编译状态关键字（可能仍在编译中或日志未包含状态行）。")
-        try:
-            net_origins: list[str] = []
-            for line in logs.splitlines():
-                s = line.strip()
-                if 'Network' in s and 'http://' in s:
-                    m = re.search(r"(http://[A-Za-z0-9\.-]+:\\d+)", s)
-                    if m:
-                        og = m.group(1)
-                        if og not in net_origins:
-                            net_origins.append(og)
-            for og in net_origins:
-                print(f"  尝试对 Network Origin 进行预检：{og}")
-                _cors_preflight(og)
-        except Exception:
-            pass
+            print(f"  ⚠️ 未安装或未识别 systemd 单元：{admin_unit or 'bs01-admin.service'}，跳过编译状态检测。")
     else:
-        print(f"  ⚠️ 未安装或未识别 systemd 单元：{admin_unit or 'bs01-admin.service'}，跳过编译状态检测。")
+        print("\n[信息] 已跳过前端开发自检（CORS 预检、Admin 编译状态）。如需检查，请附加 --include-frontend-dev。")
 
-    # Compare systemd units with deploy/systemd
-    print("\n[信息] 校验 systemd 单元与 deploy/systemd 是否一致...")
+    # Compare systemd units with deploy service templates
+    print("\n[信息] 校验 systemd 单元与部署模板是否一致...")
     def _read(p: Path) -> str:
         try:
             return p.read_text(encoding='utf-8')
@@ -541,17 +658,22 @@ def cmd_doctor(args):
             if s.startswith('ExecStart='):
                 lines.append(s)
         return lines
-    for key, unit in SERVICES.items():
+    check_targets = list(PRODUCTION_TARGETS)
+    if include_frontend_dev:
+        check_targets.extend(DEV_TARGETS)
+    for key in check_targets:
+        unit = SERVICES[key]
         sys_path = SYSTEMD_DIR / unit
-        dep_path = SERVICE_DIR / unit
+        dep_path = SERVICE_FILES[key]
         if not sys_path.exists():
             print(f"  ❌ 未安装到 systemd: {unit} (缺少 {sys_path})")
             continue
         if not dep_path.exists():
             print(f"  ❌ 部署目录缺少：{dep_path}")
             continue
+        context = read_installed_service_context(sys_path) or build_service_context()
         sys_exec = _execstarts(_read(sys_path))
-        dep_exec = _execstarts(_read(dep_path))
+        dep_exec = _execstarts(render_service_template(dep_path, context))
         if sys_exec != dep_exec:
             print(f"  ⚠️ 单元不一致: {unit}")
             print(f"     systemd: {sys_exec or ['<无>']}")
@@ -593,19 +715,19 @@ def interactive_menu():
         if num == 0:
             break
         elif num == 1:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], 'all')
             cmd_status(argparse.Namespace(targets=[tgt]))
         elif num == 2:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], 'all')
             cmd_start(argparse.Namespace(targets=[tgt]))
         elif num == 3:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], 'all')
             cmd_stop(argparse.Namespace(targets=[tgt]))
         elif num == 4:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], 'all')
             cmd_restart(argparse.Namespace(targets=[tgt]))
         elif num == 5:
-            tgt = _choice("目标服务", ['backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], 'backend')
+            tgt = _choice("目标服务", ['backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], 'backend')
             lines = _prompt("显示日志行数", "200")
             try:
                 n = int(lines)
@@ -617,8 +739,9 @@ def interactive_menu():
             skip_fe = not _yesno("安装前端依赖?", 'y')
             cmd_install(argparse.Namespace(skip_frontend=skip_fe))
         elif num == 7:
-            en = _yesno("安装后是否启用并启动后端、前端与 Celery?", 'n')
-            cmd_setup_services(argparse.Namespace(enable=en))
+            include_dev = _yesno("是否同时安装前端开发用 systemd 单元?", 'n')
+            en = _yesno("安装后是否启用并启动默认生产服务?", 'n')
+            cmd_setup_services(argparse.Namespace(enable=en, include_frontend_dev=include_dev))
         elif num == 8:
             cmd_migrate(argparse.Namespace())
         elif num == 9:
@@ -630,7 +753,8 @@ def interactive_menu():
             keep = _yesno("是否保留测试数据库?", 'y')
             cmd_test(argparse.Namespace(label=label, keepdb=keep))
         elif num == 12:
-            cmd_doctor(argparse.Namespace())
+            include_dev = _yesno("是否附加检查前端开发服务?", 'n')
+            cmd_doctor(argparse.Namespace(include_frontend_dev=include_dev))
         elif num == 13:
             cmd_uniapp_build_h5(argparse.Namespace())
         elif num == 14:
@@ -653,7 +777,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 服务控制
     for name in ('status', 'start', 'stop', 'restart', 'enable', 'disable'):
-        sp = sub.add_parser(name, help=f"{name} 服务：backend/web/admin/mobile/celery/celery-beat/all")
+        sp = sub.add_parser(name, help=f"{name} 服务：backend/web/admin/mobile/celery/celery-transcode/celery-beat/all")
         sp.add_argument('targets', nargs='*', help="目标服务，默认 all")
         sp.set_defaults(func=globals()[f"cmd_{name}"])
 
@@ -661,7 +785,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_reload)
 
     sp = sub.add_parser('logs', help='查看服务日志（使用 journalctl）')
-    sp.add_argument('target', choices=['backend', 'web', 'admin', 'mobile', 'celery', 'celery-beat'], help='目标服务')
+    sp.add_argument('target', choices=['backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], help='目标服务')
     sp.add_argument('-n', '--lines', type=int, default=200, help='显示行数，默认 200')
     sp.add_argument('-f', '--follow', action='store_true', help='持续跟随')
     sp.set_defaults(func=cmd_logs)
@@ -671,8 +795,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--skip-frontend', action='store_true', help='跳过前端依赖安装')
     sp.set_defaults(func=cmd_install)
 
-    sp = sub.add_parser('setup-services', help='安装/更新 systemd 服务单元并重载')
-    sp.add_argument('--enable', action='store_true', help='完成后立即启用并启动全部服务')
+    sp = sub.add_parser('setup-services', help='安装/更新 systemd 服务单元并重载（默认仅生产服务）')
+    sp.add_argument('--enable', action='store_true', help='完成后立即启用并启动默认生产服务')
+    sp.add_argument('--include-frontend-dev', action='store_true', help='额外安装前端开发用 systemd 单元')
+    sp.add_argument('--project-root', default=str(BASE_DIR), help='渲染 systemd 模板时使用的项目根目录')
+    sp.add_argument('--service-user', default=default_service_user(), help='渲染 systemd 模板时使用的运行用户')
+    sp.add_argument('--service-group', default=default_service_group(), help='渲染 systemd 模板时使用的运行组')
+    sp.add_argument('--npm-bin', default=default_npm_bin(), help='前端开发服务使用的 npm 可执行路径')
     sp.set_defaults(func=cmd_setup_services)
 
     # Django 常用命令
@@ -690,7 +819,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--keepdb', action='store_true', help='保留测试数据库')
     sp.set_defaults(func=cmd_test)
 
-    sp = sub.add_parser('doctor', help='体检（状态/端口/文件）')
+    sp = sub.add_parser('doctor', help='体检（默认生产服务，可选附加前端开发服务）')
+    sp.add_argument('--include-frontend-dev', action='store_true', help='附加检查前端开发端口、CORS 预检与编译状态')
     sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser('uniapp-build-h5', help='构建 uni-app H5 生产包')

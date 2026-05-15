@@ -54,12 +54,25 @@ fi
 if [[ $SKIP_SYSTEMD -eq 0 ]]; then
   SYS_DIR="/etc/systemd/system"
   to_pack=()
-  for u in bs01-gunicorn.service bs01-web.service bs01-admin.service bs01-celery.service bs01-celery-beat.service; do
+  for u in bs01-gunicorn.service bs01-celery.service bs01-celery-transcode.service bs01-celery-beat.service; do
     [[ -f "$SYS_DIR/$u" ]] && to_pack+=("$u") || true
   done
   if [[ ${#to_pack[@]} -gt 0 ]]; then
     tar -czf "$DST_DIR/systemd.tgz" -C "$SYS_DIR" "${to_pack[@]}"
   fi
+  "$ROOT/.venv/bin/python" - <<'PY' > "$DST_DIR/systemd-render.env"
+from pathlib import Path
+import shlex
+import bs01ctl
+
+sys_path = Path('/etc/systemd/system/bs01-gunicorn.service')
+ctx = bs01ctl.read_installed_service_context(sys_path) if sys_path.exists() else None
+if ctx is None:
+    ctx = bs01ctl.build_service_context()
+
+for key in ('project_root', 'service_user', 'service_group', 'npm_bin'):
+    print(f"{key.upper()}={shlex.quote(ctx[key])}")
+PY
 fi
 
 # database dump (PostgreSQL)

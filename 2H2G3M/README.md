@@ -5,7 +5,7 @@
 部署目标（生产形态）：
 
 - 后端：Gunicorn（systemd）监听 `127.0.0.1:8000`
-- 异步：Celery（systemd），2C2G 调优（默认并发 `-c 1`）
+- 异步：Celery + Celery Beat（systemd），2C2G 调优（默认并发 `-c 1`）
 - 前端：Web/管理端 **构建为静态文件**，由 Nginx 托管
 - 媒体：本机磁盘 `/root/BS01/backend/media/`，由 Nginx 直出 `/media/`
 - 域名：无真实域名，使用 hosts 虚拟域名
@@ -13,6 +13,7 @@
   - `admin.bs01.local`
   - `api.bs01.local`
 - HTTPS：不强制（HTTP 80）
+- 上传限制：建议单文件不超过 `200MB`
 
 ---
 
@@ -142,6 +143,15 @@ sudo ufw status verbose
 - 22/tcp（OpenSSH）允许
 - 80/tcp 允许
 
+2.4.1 禁止对外暴露开发端口：
+
+```bash
+sudo ufw deny 8000/tcp || true
+sudo ufw deny 8080/tcp || true
+sudo ufw deny 8082/tcp || true
+sudo ufw deny 5173/tcp || true
+```
+
 2.5（强烈推荐，2G 内存场景）创建 Swap（可选但建议）：
 
 ```bash
@@ -251,12 +261,15 @@ sudo cp /root/BS01/2H2G3M/env/backend.env.production.example /root/BS01/backend/
 
 - `SECRET_KEY=...`（必须）
 - `DB_PASSWORD=...`（必须）
-- `ALLOWED_HOSTS=api.bs01.local,127.0.0.1,localhost,117.72.192.70`（服务器公网 IP 已替换）
+- `ALLOWED_HOSTS=api.bs01.local,web.bs01.local,admin.bs01.local,127.0.0.1,localhost`
+- `SITE_URL=http://api.bs01.local`
+- `SERVE_MEDIA=false`
+- `VIDEO_MAX_SIZE_BYTES=209715200`
 
 6.3 立刻检查（确保 SECRET_KEY 没漏）：
 
 ```bash
-grep -E '^(SECRET_KEY|DEBUG|ALLOWED_HOSTS|DB_NAME|DB_USER|DB_PASSWORD|DB_HOST|REDIS_URL)=' /root/BS01/backend/.env
+grep -E '^(SECRET_KEY|DEBUG|ALLOWED_HOSTS|SITE_URL|SERVE_MEDIA|VIDEO_MAX_SIZE_BYTES|DB_NAME|DB_USER|DB_PASSWORD|DB_HOST|REDIS_URL)=' /root/BS01/backend/.env
 ```
 
 预期：能看到这些 key；其中 `DEBUG=false`。
@@ -365,7 +378,7 @@ sudo bash /root/BS01/2H2G3M/scripts/install_systemd_units.sh
 10.2 启动后端与 Celery：
 
 ```bash
-sudo systemctl enable --now bs01-gunicorn bs01-celery
+sudo systemctl enable --now bs01-gunicorn bs01-celery bs01-celery-transcode bs01-celery-beat
 ```
 
 10.3 检查状态：
@@ -373,6 +386,8 @@ sudo systemctl enable --now bs01-gunicorn bs01-celery
 ```bash
 sudo systemctl status bs01-gunicorn --no-pager
 sudo systemctl status bs01-celery --no-pager
+sudo systemctl status bs01-celery-transcode --no-pager
+sudo systemctl status bs01-celery-beat --no-pager
 ```
 
 10.4 验证后端端口只在本机监听（预期 127.0.0.1:8000）：
@@ -450,7 +465,7 @@ curl -i http://api.bs01.local/api/health/
 13.1 查看状态：
 
 ```bash
-sudo systemctl status bs01-gunicorn bs01-celery --no-pager
+sudo systemctl status bs01-gunicorn bs01-celery bs01-celery-transcode bs01-celery-beat --no-pager
 ```
 
 13.2 重启后端：
@@ -482,7 +497,7 @@ sudo systemctl restart bs01-gunicorn
 ```
 
 14.2 Celery 抢占资源：
-- 2C2G 建议默认只启用 `bs01-celery`，并保持 `-c 1`
+- 2C2G 建议常驻 `bs01-celery` 与 `bs01-celery-beat`，并保持 `-c 1`
 - 转码服务 `bs01-celery-transcode` 建议按需手动启用：
 
 ```bash
@@ -510,7 +525,7 @@ sudo systemctl restart bs01-celery
 ```
 
 14.3 上传大文件失败：
-- Nginx `client_max_body_size` 需大于你的上传限制（本配置为 600m）
+- Nginx `client_max_body_size` 需大于你的上传限制（本配置为 220m）
 
 ---
 

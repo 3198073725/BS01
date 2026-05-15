@@ -19,7 +19,9 @@ VidSprout 是一个现代化、可二次开发的视频平台项目。本仓库�
 - `deploy/`
   - 生产部署参考（systemd、环境变量模板、Nginx 要点等）
 - `deploy/systemd/`
-  - systemd 服务单元文件（后端 Gunicorn / Celery / Web / Admin）
+  - 生产 systemd 服务单元（Gunicorn / Celery）
+- `deploy/systemd-dev/`
+  - 可选的前端开发用 systemd 单元（Web / Admin / Mobile dev server）
 - `deploy/scripts/`
   - 部署/运维脚本（安装系统依赖、安装 systemd、备份与恢复等）
 - `bento4/`
@@ -139,7 +141,7 @@ cp deploy/env.example backend/.env
 
 - `SECRET_KEY`
 - `DEBUG`（本地可 true，生产必须 false）
-- `DB_*` 或 `DATABASE_URL`
+- `DB_*`
 - `REDIS_URL`
 - `CORS_ALLOWED_ORIGINS`、`CSRF_TRUSTED_ORIGINS`（联调前端必须）
 
@@ -165,17 +167,17 @@ python manage.py runserver
 
 ```bash
 cd backend
-celery -A core worker -l info
+celery -A backend worker -l info
 ```
 
-（如有 beat 定时任务，也可启动：`celery -A core beat -l info`，生产部署参考 `deploy/systemd`。）
+（如有 beat 定时任务，也可启动：`celery -A backend beat -l info`，生产部署参考 `deploy/systemd`。）
 
 ### 3) Web 前台（web-client）
 
 ```bash
 cd web-client
 npm install
-npm run dev
+npm run serve
 ```
 
 > 具体脚本以 `web-client/package.json` 为准。
@@ -258,9 +260,9 @@ npm install
 `bs01ctl.py` 是一个 Python 运维脚本，封装了常见操作：
 
 - 服务：`status/start/stop/restart/logs`
-- 部署：`install`（安装后端+前端依赖）、`setup-services`（安装/更新 systemd 单元）
+- 部署：`install`（安装后端+前端依赖）、`setup-services`（默认安装生产 systemd 单元）
 - Django：`migrate/check/collectstatic/test`
-- 体检：`doctor`（端口、服务、依赖、ffmpeg 等检查）
+- 体检：`doctor`（默认检查生产服务；可附加前端开发服务检查）
 - 移动端：`uniapp-build-h5`、`uniapp-dev-start/stop/status`
 
 常用示例：
@@ -273,9 +275,10 @@ python3 bs01ctl.py install
 python3 bs01ctl.py migrate
 python3 bs01ctl.py setup-services --enable
 python3 bs01ctl.py doctor
+python3 bs01ctl.py doctor --include-frontend-dev
 ```
 
-> 注意：脚本内假定项目路径类似 `/root/BS01`，并且部分操作需要 root 权限（非 root 时会尝试使用 sudo）。
+> 注意：脚本默认以当前仓库根目录作为项目路径；涉及 systemd 的操作通常需要 root 权限（非 root 时会尝试使用 sudo）。
 
 ### 2) systemd 单元文件：`deploy/systemd/`
 
@@ -285,8 +288,6 @@ python3 bs01ctl.py doctor
 - `bs01-celery.service`
 - `bs01-celery-transcode.service`
 - `bs01-celery-beat.service`
-- `bs01-web.service`
-- `bs01-admin.service`
 
 你可以使用：
 
@@ -296,6 +297,19 @@ python3 bs01ctl.py setup-services --enable
 
 将单元安装到 `/etc/systemd/system/` 并启用启动。
 
+前端开发用服务单元位于 `deploy/systemd-dev/`。只有在你明确希望用 systemd 长驻开发服务器时，才执行：
+
+```bash
+python3 bs01ctl.py setup-services --include-frontend-dev
+```
+
+所有 systemd 模板都会在安装时由 `bs01ctl.py` 渲染项目路径、运行用户/组和 npm 路径。常见覆盖方式：
+
+```bash
+python3 bs01ctl.py setup-services --service-user bs01 --service-group bs01
+python3 bs01ctl.py setup-services --project-root /srv/vidsprout
+```
+
 ### 3) 部署脚本：`deploy/scripts/`
 
 该目录提供部署/运维辅助脚本（以实际文件为准）：
@@ -304,6 +318,10 @@ python3 bs01ctl.py setup-services --enable
 - `install_systemd.sh`：安装/更新 systemd 单元
 - `backup.sh`：备份（通常包含数据库/关键目录）
 - `restore.sh`：恢复备份
+
+说明：
+- `backup.sh` 会额外保存当前生产 systemd 单元和渲染参数快照。
+- `restore.sh` 默认按当前机器重新渲染并安装生产 unit；只有在路径、用户、npm 布局都一致时才应使用 `--reuse-systemd-render`。
 
 ---
 

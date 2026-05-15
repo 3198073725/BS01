@@ -5,7 +5,7 @@
 - **后端代码目录**：`/root/BS01/backend`
 - **Gunicorn 监听**：`127.0.0.1:8000`
 - **对外访问**：推荐通过 Nginx 反代到 `:8000`（以及可选静态直出 `/media/`）
-- **异步任务**：Celery（建议也部署，否则转码/生成缩略图会不工作）
+- **异步任务**：Celery + Celery Beat（建议一起部署，否则转码/生成缩略图/上传会话清理不会完整工作）
 
 > 说明：本仓库是主仓库 + submodule 结构。后端是 submodule：`/root/BS01/backend`。
 
@@ -125,12 +125,14 @@ cp /root/BS01/2H2G3M/env/backend.env.production.example .env
 - `SECRET_KEY=...`
 - `DEBUG=false`
 - `ALLOWED_HOSTS=...`
-- `DATABASE_URL=postgres://...` 或对应的 DB 配置（以你文件里的字段为准）
 - `REDIS_URL=redis://127.0.0.1:6379/0`
+- `SITE_URL=http://api.bs01.local`
+- `SERVE_MEDIA=false`
+- `VIDEO_MAX_SIZE_BYTES=209715200`
 
 ### 5.3 重要：媒体目录（解决 /media 404 的关键）
 
-如果你希望媒体文件放在 **服务器的 `/root/BS01/media`**（而不是默认的 `/root/BS01/backend/media`），请在 `.env` 里设置：
+默认配置就是 `/root/BS01/backend/media`。如果你要改路径，再额外设置：
 
 ```bash
 MEDIA_ROOT=/root/BS01/media
@@ -188,6 +190,7 @@ python manage.py runserver 0.0.0.0:8000
 - `2H2G3M/systemd/bs01-gunicorn.service`
 - `2H2G3M/systemd/bs01-celery.service`
 - `2H2G3M/systemd/bs01-celery-transcode.service`
+- `2H2G3M/systemd/bs01-celery-beat.service`
 
 ### 8.1 安装 unit 文件
 
@@ -217,14 +220,12 @@ sudo journalctl -u bs01-gunicorn -f
 ## 9.（强烈推荐）部署 Celery（否则转码/缩略图等不会异步执行）
 
 ```bash
-sudo systemctl enable bs01-celery
-sudo systemctl start bs01-celery
+sudo systemctl enable bs01-celery bs01-celery-transcode bs01-celery-beat
+sudo systemctl start bs01-celery bs01-celery-transcode bs01-celery-beat
 sudo systemctl status bs01-celery --no-pager
 
-# 如果你把转码任务单独拆成一个 worker（视你 unit 配置而定）
-sudo systemctl enable bs01-celery-transcode
-sudo systemctl start bs01-celery-transcode
 sudo systemctl status bs01-celery-transcode --no-pager
+sudo systemctl status bs01-celery-beat --no-pager
 ```
 
 查看日志：
@@ -232,6 +233,7 @@ sudo systemctl status bs01-celery-transcode --no-pager
 ```bash
 sudo journalctl -u bs01-celery -n 200 --no-pager
 sudo journalctl -u bs01-celery-transcode -n 200 --no-pager
+sudo journalctl -u bs01-celery-beat -n 200 --no-pager
 ```
 
 ---
@@ -253,6 +255,14 @@ cd /root/BS01
 sudo bash 2H2G3M/scripts/install_nginx_conf.sh
 sudo nginx -t
 sudo systemctl reload nginx
+```
+
+如果你启用了 `/static/` 直出，别漏掉：
+
+```bash
+cd /root/BS01/backend
+source .venv/bin/activate
+python manage.py collectstatic --noinput
 ```
 
 ---
