@@ -29,6 +29,7 @@ import socket
 import shutil
 import http.client
 import re
+from urllib.parse import urlparse
 import pwd
 import grp
 from pathlib import Path
@@ -67,6 +68,14 @@ UNIAPP_ROOT = BASE_DIR / 'mobile_uniapp'
 UNIAPP_DEV_PID = Path('/tmp/bs01_uniapp_dev.pid')
 UNIAPP_DEV_LOG = Path('/tmp/bs01_uniapp_dev.log')
 DEFAULT_TARGETS = PRODUCTION_TARGETS
+DEPLOY_SCRIPTS_DIR = BASE_DIR / 'deploy' / 'scripts'
+WEB_DIST_DIR = BASE_DIR / 'web-client' / 'dist'
+ADMIN_DIST_DIR = BASE_DIR / 'admin-console' / 'dist'
+WEB_STATIC_DST = Path('/var/www/bs01/web')
+ADMIN_STATIC_DST = Path('/var/www/bs01/admin')
+LEGACY_NGINX_CONF = BASE_DIR / '2H2G3M' / 'nginx' / 'bs01.conf'
+NGINX_AVAIL = Path('/etc/nginx/sites-available/bs01.conf')
+NGINX_ENABLED = Path('/etc/nginx/sites-enabled/bs01.conf')
 
 # ------------------------- 工具函数 -------------------------
 
@@ -81,6 +90,20 @@ def run(cmd: str, cwd: Path | None = None, check: bool = True) -> int:
     if check and proc.returncode != 0:
         raise SystemExit(proc.returncode)
     return proc.returncode
+
+
+def run_capture(cmd: str, cwd: Path | None = None) -> tuple[int, str]:
+    """运行命令并捕获输出。"""
+    print(f"$ {cmd}")
+    proc = subprocess.run(
+        cmd,
+        shell=True,
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+    )
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return proc.returncode, output
 
 
 def systemctl(args: str, check: bool = True) -> int:
@@ -108,6 +131,26 @@ def ensure_paths():
         raise SystemExit(1)
     if not ENV_FILE.exists():
         print("[警告] 未找到环境文件 .env：", ENV_FILE)
+
+
+def ensure_script(path: Path) -> Path:
+    if not path.exists():
+        print("[错误] 未找到脚本：", path)
+        raise SystemExit(1)
+    return path
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if not path.exists():
+        return env
+    for raw in path.read_text(encoding='utf-8').splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        env[key.strip()] = value.strip().strip('"').strip("'")
+    return env
 
 
 def default_service_user() -> str:
@@ -419,6 +462,55 @@ def cmd_install(args):
             run("npm i --no-audit --no-fund", cwd=UNIAPP_ROOT)
 
 
+def cmd_install_os_deps(args):
+    script = ensure_script(DEPLOY_SCRIPTS_DIR / 'install_os_deps.sh')
+    extra = " --db-from-env" if args.db_from_env else ""
+    run(f"bash {shlex.quote(str(script))}{extra}", cwd=BASE_DIR)
+
+
+def cmd_build_frontends(args):
+    if (BASE_DIR / 'web-client' / 'package.json').exists():
+        run("npm ci --no-audit --no-fund || npm i --no-audit --no-fund", cwd=BASE_DIR / 'web-client')
+        run("npm run build", cwd=BASE_DIR / 'web-client')
+    if (BASE_DIR / 'admin-console' / 'package.json').exists():
+        run("npm ci --no-audit --no-fund || npm i --no-audit --no-fund", cwd=BASE_DIR / 'admin-console')
+        run("npm run build", cwd=BASE_DIR / 'admin-console')
+
+
+def cmd_deploy_frontend_static(args):
+    if not WEB_DIST_DIR.exists():
+        print(f"[错误] 未找到前台构建产物：{WEB_DIST_DIR}")
+        raise SystemExit(1)
+    if not ADMIN_DIST_DIR.exists():
+        print(f"[错误] 未找到管理端构建产物：{ADMIN_DIST_DIR}")
+        raise SystemExit(1)
+    if not is_root():
+        print("[错误] 静态发布需要 root 权限。")
+        raise SystemExit(1)
+    WEB_STATIC_DST.mkdir(parents=True, exist_ok=True)
+    ADMIN_STATIC_DST.mkdir(parents=True, exist_ok=True)
+    run(f"rm -rf {shlex.quote(str(WEB_STATIC_DST))}/*")
+    run(f"rm -rf {shlex.quote(str(ADMIN_STATIC_DST))}/*")
+    run(f"cp -r {shlex.quote(str(WEB_DIST_DIR))}/. {shlex.quote(str(WEB_STATIC_DST))}/")
+    run(f"cp -r {shlex.quote(str(ADMIN_DIST_DIR))}/. {shlex.quote(str(ADMIN_STATIC_DST))}/")
+
+
+def cmd_install_nginx_conf(args):
+    src = LEGACY_NGINX_CONF
+    if not src.exists():
+        print(f"[错误] 未找到 Nginx 配置模板：{src}")
+        raise SystemExit(1)
+    if not is_root():
+        print("[错误] 安装 Nginx 配置需要 root 权限。")
+        raise SystemExit(1)
+    run(f"cp {shlex.quote(str(src))} {shlex.quote(str(NGINX_AVAIL))}")
+    run(f"ln -sf {shlex.quote(str(NGINX_AVAIL))} {shlex.quote(str(NGINX_ENABLED))}")
+    run("rm -f /etc/nginx/sites-enabled/default", check=False)
+    run("nginx -t")
+    if args.reload:
+        run("systemctl reload nginx")
+
+
 def cmd_setup_services(args):
     """安装/更新 systemd 单元并重载。"""
     context = build_service_context(args)
@@ -452,6 +544,48 @@ def cmd_setup_services(args):
             cmd_start(argparse.Namespace(targets=DEV_TARGETS))
 
 
+def cmd_backup(args):
+    script = ensure_script(DEPLOY_SCRIPTS_DIR / 'backup.sh')
+    parts = ["bash", shlex.quote(str(script))]
+    if args.dir:
+        parts.extend(["--dir", shlex.quote(args.dir)])
+    if args.no_db:
+        parts.append("--no-db")
+    if args.no_media:
+        parts.append("--no-media")
+    if args.no_systemd:
+        parts.append("--no-systemd")
+    if args.no_code:
+        parts.append("--no-code")
+    if args.no_bundle:
+        parts.append("--no-bundle")
+    run(" ".join(parts), cwd=BASE_DIR)
+
+
+def cmd_restore(args):
+    script = ensure_script(DEPLOY_SCRIPTS_DIR / 'restore.sh')
+    parts = ["bash", shlex.quote(str(script))]
+    if args.src:
+        parts.extend(["--src", shlex.quote(args.src)])
+    if args.with_db:
+        parts.append("--with-db")
+    if args.wipe_media:
+        parts.append("--wipe-media")
+    if args.reuse_systemd_render:
+        parts.append("--reuse-systemd-render")
+    if args.include_frontend_dev:
+        parts.append("--include-frontend-dev")
+    if args.service_user:
+        parts.extend(["--service-user", shlex.quote(args.service_user)])
+    if args.service_group:
+        parts.extend(["--service-group", shlex.quote(args.service_group)])
+    if args.project_root:
+        parts.extend(["--project-root", shlex.quote(args.project_root)])
+    if args.npm_bin:
+        parts.extend(["--npm-bin", shlex.quote(args.npm_bin)])
+    run(" ".join(parts), cwd=BASE_DIR)
+
+
 def cmd_migrate(args):
     ensure_paths()
     run(f"{VENV_PY} {MANAGE_PY} migrate", cwd=BASE_DIR)
@@ -477,6 +611,7 @@ def cmd_test(args):
 def cmd_doctor(args):
     """基本体检：默认检查生产服务，可选附加前端开发服务。"""
     include_frontend_dev = bool(getattr(args, 'include_frontend_dev', False))
+    env_map = parse_env_file(ENV_FILE)
     status_targets = ['all']
     if include_frontend_dev:
         status_targets = ['all'] + DEV_TARGETS
@@ -486,6 +621,15 @@ def cmd_doctor(args):
     for p in [VENV_PY, MANAGE_PY, ENV_FILE]:
         print("  ✅ 存在" if p.exists() else "  ❌ 不存在", "-", p)
     print("\n[信息] 检查端口连通性...")
+    def _probe_tcp(host: str, port: int) -> tuple[str, str]:
+        try:
+            with socket.create_connection((host, port), timeout=1.5):
+                return "ok", f"{host}:{port} 可连接"
+        except PermissionError as e:
+            return "skip", f"{host}:{port} 检查受限：{e}"
+        except OSError as e:
+            return "err", f"{host}:{port} 不可用：{e}"
+
     targets = [
         ("后端", "127.0.0.1", 8000),
     ]
@@ -496,11 +640,9 @@ def cmd_doctor(args):
             ("移动端", "127.0.0.1", 5173),
         ])
     for name, host, port in targets:
-        try:
-            with socket.create_connection((host, port), timeout=1.5):
-                print(f"  ✅ {name} {host}:{port} 可连接")
-        except OSError as e:
-            print(f"  ❌ {name} {host}:{port} 不可用：{e}")
+        status, msg = _probe_tcp(host, port)
+        icon = "✅" if status == "ok" else ("⚠️" if status == "skip" else "❌")
+        print(f"  {icon} {name} {msg}")
     if not include_frontend_dev:
         print("  ℹ️ 前端开发端口检查默认跳过；如需检查 8080/8082/5173，请附加 --include-frontend-dev")
 
@@ -535,19 +677,26 @@ def cmd_doctor(args):
     print("\n[信息] 检查 Celery 可用性...")
     if CELERY_BIN.exists():
         # 显式指定工作目录与 PYTHONPATH，避免导入 backend 失败导致误报
-        run(f"{CELERY_BIN} --version", check=False, cwd=BASE_DIR)
+        rc_ver, out_ver = run_capture(f"{CELERY_BIN} --version", cwd=BASE_DIR)
+        if rc_ver == 0:
+            version_line = out_ver.splitlines()[0] if out_ver else "unknown"
+            print(f"  ✅ Celery CLI 可执行：{version_line}")
+        else:
+            brief = out_ver.splitlines()[-1] if out_ver else "未知错误"
+            print(f"  ❌ Celery CLI 执行失败：{brief}")
+
         # 使用 -A backend（Celery 会在 backend/celery.py 中自动发现 app）
         py_path = shlex.quote(str(BASE_DIR / 'backend'))
-        rc = run(
+        rc, out = run_capture(
             f"PYTHONPATH={py_path} DJANGO_SETTINGS_MODULE=backend.settings "
             f"{CELERY_BIN} -A backend.celery:app inspect ping -t 2",
-            check=False,
             cwd=BASE_DIR,
         )
         if rc == 0:
             print("  ✅ Celery worker 可响应 ping")
         else:
-            print("  ❌ Celery worker 未响应 ping（可能无 worker 在线，或 broker 配置异常）。")
+            detail = out.splitlines()[-1] if out else "无输出"
+            print(f"  ❌ Celery worker 未响应 ping：{detail}")
     else:
         print("  ❌ 未找到 Celery 可执行文件：", CELERY_BIN)
 
@@ -596,53 +745,136 @@ def cmd_doctor(args):
         else:
             print(f"  ✅ 预检通过（Origin={origin}，ACAO={acao}，Methods={acam or '-'}，Headers={acah or '-'}）")
 
+    def _read_unit_logs(unit: str, lines: int = 200) -> str:
+        cmd = ["journalctl", "-u", unit, "-n", str(lines), "--no-pager"]
+        if not is_root():
+            cmd = ["sudo"] + cmd
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            return (proc.stdout or "") + (proc.stderr or "")
+        except Exception as e:
+            print(f"  ⚠️ 读取 {unit} 日志失败：{e}")
+            return ""
+
+    def _extract_http_origins(logs: str) -> list[str]:
+        origins: list[str] = []
+        for line in logs.splitlines():
+            for match in re.findall(r"http://[A-Za-z0-9\.-]+:\d+", line):
+                if match not in origins:
+                    origins.append(match)
+        return origins
+
+    def _report_frontend_logs(label: str, unit_key: str, success_markers: list[str]) -> list[str]:
+        print(f"\n[信息] {label} 前端编译/启动状态检测（读取 journalctl）...")
+        unit = SERVICES.get(unit_key)
+        if not unit or not unit_installed(unit):
+            print(f"  ⚠️ 未安装或未识别 systemd 单元：{unit or unit_key}，跳过状态检测。")
+            return []
+        logs = _read_unit_logs(unit)
+        low = logs.lower()
+        if not logs.strip():
+            print("  ⚠️ 无日志输出，可能服务未启动或日志被轮转。")
+        elif "failed to compile" in low or "module not found" in low or re.search(r"error in \\S+", low):
+            print("  ❌ 检测到编译错误（包含 'Failed to compile'/'Module not found' 等关键字）。")
+        elif "compiled with warnings" in low:
+            print("  ⚠️ 已编译但存在警告（Compiled with warnings）。")
+        elif any(marker in low for marker in success_markers):
+            print("  ✅ 已检测到成功启动/编译标记。")
+        else:
+            print("  ℹ️ 未检测到显著的启动或编译状态关键字。")
+        return _extract_http_origins(logs)
+
     if include_frontend_dev:
-        for og in ("http://127.0.0.1:8082", "http://localhost:8082"):
+        print("\n[信息] 前端开发 CORS 预检...")
+        frontend_origins = [
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "http://127.0.0.1:8082",
+            "http://localhost:8082",
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ]
+        for og in frontend_origins:
             _cors_preflight(og)
 
-        print("\n[信息] Admin 前端编译状态检测（读取 journalctl）...")
-        admin_unit = SERVICES.get('admin')
-        if admin_unit and unit_installed(admin_unit):
-            cmd = ["journalctl", "-u", admin_unit, "-n", "200", "--no-pager"]
-            if not is_root():
-                cmd = ["sudo"] + cmd
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True)
-                logs = (proc.stdout or "") + (proc.stderr or "")
-            except Exception as e:
-                logs = ""
-                print(f"  ⚠️ 读取日志失败：{e}")
-
-            low = logs.lower()
-            if not logs.strip():
-                print("  ⚠️ 无日志输出，可能服务未启动或日志被轮转。")
-            elif "failed to compile" in low or "module not found" in low or re.search(r"error in \\S+", low):
-                print("  ❌ 检测到编译错误（包含 'Failed to compile'/'Module not found' 等关键字）。")
-            elif "compiled with warnings" in low:
-                print("  ⚠️ 已编译但存在警告（Compiled with warnings）。")
-            elif "compiled successfully" in low:
-                print("  ✅ 已编译成功（Compiled successfully）。")
-            else:
-                print("  ℹ️ 未检测到显著的编译状态关键字（可能仍在编译中或日志未包含状态行）。")
-            try:
-                net_origins: list[str] = []
-                for line in logs.splitlines():
-                    s = line.strip()
-                    if 'Network' in s and 'http://' in s:
-                        m = re.search(r"(http://[A-Za-z0-9\.-]+:\\d+)", s)
-                        if m:
-                            og = m.group(1)
-                            if og not in net_origins:
-                                net_origins.append(og)
-                for og in net_origins:
-                    print(f"  尝试对 Network Origin 进行预检：{og}")
-                    _cors_preflight(og)
-            except Exception:
-                pass
-        else:
-            print(f"  ⚠️ 未安装或未识别 systemd 单元：{admin_unit or 'bs01-admin.service'}，跳过编译状态检测。")
+        discovered_origins: list[str] = []
+        discovered_origins.extend(_report_frontend_logs("Web", "web", ["compiled successfully"]))
+        discovered_origins.extend(_report_frontend_logs("Admin", "admin", ["compiled successfully"]))
+        discovered_origins.extend(_report_frontend_logs("移动端", "mobile", ["ready in", "local:", "network:"]))
+        for og in discovered_origins:
+            if og not in frontend_origins:
+                print(f"  尝试对日志中的 Origin 进行预检：{og}")
+                _cors_preflight(og)
     else:
         print("\n[信息] 已跳过前端开发自检（CORS 预检、Admin 编译状态）。如需检查，请附加 --include-frontend-dev。")
+
+    print("\n[信息] 检查 PostgreSQL 配置与连通性...")
+    db_engine = env_map.get('DB_ENGINE', 'django.db.backends.postgresql')
+    db_host = env_map.get('DB_HOST', '127.0.0.1') or '127.0.0.1'
+    db_port = env_map.get('DB_PORT', '5432') or '5432'
+    db_name = env_map.get('DB_NAME', '')
+    db_user = env_map.get('DB_USER', '')
+    if 'postgresql' not in db_engine:
+        print(f"  ℹ️ 当前 DB_ENGINE={db_engine}，跳过 PostgreSQL 专项检查。")
+    else:
+        if db_name and db_user:
+            print(f"  ℹ️ 目标数据库：{db_user}@{db_host}:{db_port}/{db_name}")
+        else:
+            print("  ⚠️ backend/.env 缺少 DB_NAME 或 DB_USER。")
+        status, msg = _probe_tcp(db_host, int(db_port))
+        icon = "✅" if status == "ok" else ("⚠️" if status == "skip" else "❌")
+        print(f"  {icon} PostgreSQL {msg}")
+
+    print("\n[信息] 检查 Redis 配置与连通性...")
+    redis_url = env_map.get('REDIS_URL') or env_map.get('CELERY_BROKER_URL') or env_map.get('CELERY_RESULT_BACKEND', '')
+    if redis_url:
+        parsed = urlparse(redis_url)
+        redis_host = parsed.hostname or env_map.get('REDIS_HOST', '127.0.0.1')
+        redis_port = parsed.port or int(env_map.get('REDIS_PORT', '6379') or '6379')
+    else:
+        redis_host = env_map.get('REDIS_HOST', '127.0.0.1') or '127.0.0.1'
+        redis_port = int(env_map.get('REDIS_PORT', '6379') or '6379')
+    status, msg = _probe_tcp(redis_host, int(redis_port))
+    icon = "✅" if status == "ok" else ("⚠️" if status == "skip" else "❌")
+    print(f"  {icon} Redis {msg}")
+    redis_cli = shutil.which('redis-cli')
+    if redis_cli:
+        rc, out = run_capture(f"{redis_cli} -h {shlex.quote(str(redis_host))} -p {int(redis_port)} ping")
+        if rc == 0:
+            print(f"  ✅ redis-cli ping 成功：{(out.splitlines()[-1] if out else 'PONG')}")
+        else:
+            detail = out.splitlines()[-1] if out else "无输出"
+            print(f"  ⚠️ redis-cli ping 失败：{detail}")
+    else:
+        print("  ℹ️ 未找到 redis-cli，跳过 PING 检查。")
+
+    print("\n[信息] 检查 Nginx 状态与静态目录...")
+    nginx_bin = shutil.which('nginx')
+    if not nginx_bin:
+        print("  ⚠️ 未找到 nginx 可执行文件。")
+    else:
+        rc, out = run_capture("nginx -t")
+        if rc == 0:
+            print("  ✅ nginx -t 通过")
+        else:
+            detail = out.splitlines()[-1] if out else "无输出"
+            print(f"  ❌ nginx -t 失败：{detail}")
+        rc_active, out_active = run_capture("systemctl is-active nginx")
+        state = out_active.splitlines()[-1] if out_active else "unknown"
+        icon = "✅" if rc_active == 0 and state == "active" else "⚠️"
+        print(f"  {icon} nginx 服务状态：{state}")
+    for label, path in (("前台静态目录", WEB_STATIC_DST), ("管理端静态目录", ADMIN_STATIC_DST)):
+        if path.exists():
+            try:
+                count = sum(1 for _ in path.iterdir())
+            except Exception:
+                count = -1
+            suffix = f"（{count} 项）" if count >= 0 else ""
+            print(f"  ✅ {label}存在：{path}{suffix}")
+        else:
+            print(f"  ⚠️ {label}不存在：{path}")
+    for label, path in (("Nginx enabled 配置", NGINX_ENABLED), ("Nginx available 配置", NGINX_AVAIL)):
+        print(f"  {'✅' if path.exists() else '⚠️'} {label}：{path}")
 
     # Compare systemd units with deploy service templates
     print("\n[信息] 校验 systemd 单元与部署模板是否一致...")
@@ -651,11 +883,12 @@ def cmd_doctor(args):
             return p.read_text(encoding='utf-8')
         except Exception:
             return ''
-    def _execstarts(txt: str) -> list[str]:
+    compare_prefixes = ('User=', 'Group=', 'WorkingDirectory=', 'EnvironmentFile=', 'ExecStart=')
+    def _relevant_lines(txt: str) -> list[str]:
         lines = []
         for line in txt.splitlines():
             s = line.strip()
-            if s.startswith('ExecStart='):
+            if any(s.startswith(prefix) for prefix in compare_prefixes):
                 lines.append(s)
         return lines
     check_targets = list(PRODUCTION_TARGETS)
@@ -672,8 +905,8 @@ def cmd_doctor(args):
             print(f"  ❌ 部署目录缺少：{dep_path}")
             continue
         context = read_installed_service_context(sys_path) or build_service_context()
-        sys_exec = _execstarts(_read(sys_path))
-        dep_exec = _execstarts(render_service_template(dep_path, context))
+        sys_exec = _relevant_lines(_read(sys_path))
+        dep_exec = _relevant_lines(render_service_template(dep_path, context))
         if sys_exec != dep_exec:
             print(f"  ⚠️ 单元不一致: {unit}")
             print(f"     systemd: {sys_exec or ['<无>']}")
@@ -683,7 +916,6 @@ def cmd_doctor(args):
 
 
 def interactive_menu():
-    ensure_paths()
     while True:
         print("\n====== BS01 运维菜单 ======")
         print("1) 查看服务状态")
@@ -703,6 +935,12 @@ def interactive_menu():
         print("15) 启动 uni-app 开发服务 (H5)")
         print("16) 停止 uni-app 开发服务")
         print("17) 查看 uni-app 开发服务状态")
+        print("18) 安装系统依赖")
+        print("19) 执行备份")
+        print("20) 执行恢复")
+        print("21) 构建前端生产包")
+        print("22) 发布前端静态文件")
+        print("23) 安装 Nginx 配置")
         print("0) 退出")
         choice = _prompt("请选择编号", "1")
 
@@ -765,6 +1003,36 @@ def interactive_menu():
             cmd_uniapp_dev_stop(argparse.Namespace())
         elif num == 17:
             cmd_uniapp_dev_status(argparse.Namespace())
+        elif num == 18:
+            db_from_env = _yesno("是否按 backend/.env 初始化 PostgreSQL 用户和数据库?", 'n')
+            cmd_install_os_deps(argparse.Namespace(db_from_env=db_from_env))
+        elif num == 19:
+            cmd_backup(argparse.Namespace(
+                dir=_prompt("备份目录(留空使用默认)", "") or None,
+                no_db=not _yesno("包含数据库备份?", 'y'),
+                no_media=not _yesno("包含 media 备份?", 'y'),
+                no_systemd=not _yesno("包含 systemd 备份?", 'y'),
+                no_code=not _yesno("包含代码快照?", 'y'),
+                no_bundle=not _yesno("包含 git bundle?", 'y'),
+            ))
+        elif num == 20:
+            cmd_restore(argparse.Namespace(
+                src=_prompt("恢复来源目录(留空使用默认 latest)", "") or None,
+                with_db=_yesno("是否恢复数据库?", 'n'),
+                wipe_media=_yesno("恢复前是否清空 media?", 'n'),
+                reuse_systemd_render=_yesno("是否复用备份中的 systemd 渲染参数?", 'n'),
+                include_frontend_dev=_yesno("是否同时恢复前端开发 systemd 单元?", 'n'),
+                service_user=None,
+                service_group=None,
+                project_root=None,
+                npm_bin=None,
+            ))
+        elif num == 21:
+            cmd_build_frontends(argparse.Namespace())
+        elif num == 22:
+            cmd_deploy_frontend_static(argparse.Namespace())
+        elif num == 23:
+            cmd_install_nginx_conf(argparse.Namespace(reload=_yesno("安装后是否重载 nginx?", 'y')))
         else:
             print("[提示] 无效编号，请重试。")
 
@@ -795,6 +1063,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--skip-frontend', action='store_true', help='跳过前端依赖安装')
     sp.set_defaults(func=cmd_install)
 
+    sp = sub.add_parser('install-os-deps', help='安装系统依赖（包装 deploy/scripts/install_os_deps.sh）')
+    sp.add_argument('--db-from-env', action='store_true', help='按 backend/.env 初始化 PostgreSQL 用户和数据库')
+    sp.set_defaults(func=cmd_install_os_deps)
+
+    sp = sub.add_parser('build-frontends', help='构建前台与管理端生产包')
+    sp.set_defaults(func=cmd_build_frontends)
+
+    sp = sub.add_parser('deploy-frontend-static', help='发布前台与管理端静态文件到 /var/www/bs01')
+    sp.set_defaults(func=cmd_deploy_frontend_static)
+
+    sp = sub.add_parser('install-nginx-conf', help='安装 Nginx 站点配置')
+    sp.add_argument('--no-reload', dest='reload', action='store_false', help='安装后不重载 nginx')
+    sp.set_defaults(func=cmd_install_nginx_conf, reload=True)
+
     sp = sub.add_parser('setup-services', help='安装/更新 systemd 服务单元并重载（默认仅生产服务）')
     sp.add_argument('--enable', action='store_true', help='完成后立即启用并启动默认生产服务')
     sp.add_argument('--include-frontend-dev', action='store_true', help='额外安装前端开发用 systemd 单元')
@@ -803,6 +1085,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--service-group', default=default_service_group(), help='渲染 systemd 模板时使用的运行组')
     sp.add_argument('--npm-bin', default=default_npm_bin(), help='前端开发服务使用的 npm 可执行路径')
     sp.set_defaults(func=cmd_setup_services)
+
+    sp = sub.add_parser('backup', help='执行备份（包装 deploy/scripts/backup.sh）')
+    sp.add_argument('--dir', help='备份目录')
+    sp.add_argument('--no-db', action='store_true', help='跳过数据库备份')
+    sp.add_argument('--no-media', action='store_true', help='跳过 media 备份')
+    sp.add_argument('--no-systemd', action='store_true', help='跳过 systemd 单元备份')
+    sp.add_argument('--no-code', action='store_true', help='跳过代码快照')
+    sp.add_argument('--no-bundle', action='store_true', help='跳过 git bundle')
+    sp.set_defaults(func=cmd_backup)
+
+    sp = sub.add_parser('restore', help='执行恢复（包装 deploy/scripts/restore.sh）')
+    sp.add_argument('--src', help='恢复来源目录')
+    sp.add_argument('--with-db', action='store_true', help='恢复数据库')
+    sp.add_argument('--wipe-media', action='store_true', help='恢复前清空 media')
+    sp.add_argument('--reuse-systemd-render', action='store_true', help='复用备份中的 systemd 渲染参数')
+    sp.add_argument('--include-frontend-dev', action='store_true', help='同时恢复前端开发 systemd 单元')
+    sp.add_argument('--service-user', help='覆盖恢复时使用的 service user')
+    sp.add_argument('--service-group', help='覆盖恢复时使用的 service group')
+    sp.add_argument('--project-root', help='覆盖恢复时使用的 project root')
+    sp.add_argument('--npm-bin', help='覆盖恢复时使用的 npm 路径')
+    sp.set_defaults(func=cmd_restore)
 
     # Django 常用命令
     sp = sub.add_parser('migrate', help='数据库迁移')

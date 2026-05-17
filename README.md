@@ -260,7 +260,8 @@ npm install
 `bs01ctl.py` 是一个 Python 运维脚本，封装了常见操作：
 
 - 服务：`status/start/stop/restart/logs`
-- 部署：`install`（安装后端+前端依赖）、`setup-services`（默认安装生产 systemd 单元）
+- 部署：`install`（安装后端+前端依赖）、`install-os-deps`、`build-frontends`、`deploy-frontend-static`、`install-nginx-conf`、`setup-services`（默认安装生产 systemd 单元）
+- 备份恢复：`backup`、`restore`
 - Django：`migrate/check/collectstatic/test`
 - 体检：`doctor`（默认检查生产服务；可附加前端开发服务检查）
 - 移动端：`uniapp-build-h5`、`uniapp-dev-start/stop/status`
@@ -272,8 +273,14 @@ python3 bs01ctl.py status
 python3 bs01ctl.py restart all
 python3 bs01ctl.py logs backend -f -n 200
 python3 bs01ctl.py install
+python3 bs01ctl.py install-os-deps --db-from-env
+python3 bs01ctl.py build-frontends
+python3 bs01ctl.py deploy-frontend-static
+python3 bs01ctl.py install-nginx-conf
 python3 bs01ctl.py migrate
 python3 bs01ctl.py setup-services --enable
+python3 bs01ctl.py backup
+python3 bs01ctl.py restore --src /root/BS01-backups/latest
 python3 bs01ctl.py doctor
 python3 bs01ctl.py doctor --include-frontend-dev
 ```
