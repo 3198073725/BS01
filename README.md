@@ -11,6 +11,7 @@ VidSprout 是一个视频平台 monorepo，包含后端 API、Web 前台、管�
 ## 文档入口
 
 - 总览：当前文件
+- 变更记录：[CHANGELOG.md](/root/BS01/CHANGELOG.md)
 - 通用部署说明：[deploy/README.md](/root/BS01/deploy/README.md)
 - 当前单机直连 ASGI 部署：[2H2G3M/BACKEND_DEPLOY.md](/root/BS01/2H2G3M/BACKEND_DEPLOY.md)
 - 2C2G/3M 部署资料说明：[2H2G3M/README.md](/root/BS01/2H2G3M/README.md)
@@ -35,6 +36,13 @@ VidSprout 是一个视频平台 monorepo，包含后端 API、Web 前台、管�
   当前单机生产资料，带固定路径 `/root/BS01` 的服务模板和脚本。
 - `bs01ctl.py`
   统一运维脚本。
+
+## 最近更新
+
+- 新增 AI 审核链路，管理端增加审核视图，后端补充自动审核规则与测试。
+- Web 与移动端的系统配置同步从“仅轮询”升级为“启动拉取 + 系统事件推送 + 前台恢复补拉”。
+- 移动端新增维护模式页，`maintenance_mode` 现已对 H5 与打包 App 生效。
+- 根仓库新增 [CHANGELOG.md](/root/BS01/CHANGELOG.md) 记录跨子项目变更。
 
 ## 当前建议先这样理解
 

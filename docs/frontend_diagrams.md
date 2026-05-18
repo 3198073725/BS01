@@ -43,7 +43,8 @@ graph TB
   subgraph M5["系统配置模块"]
     ApiCfg["API地址设置\n(show_api_base控制)"]
     Theme["主题切换\n(深色/浅色)"]
-    GlobalCfg["全局配置同步\n30s轮询+版本检测"]
+    GlobalCfg["全局配置同步\n启动拉取 + 系统事件 + 前台补拉"]
+    Maintenance["维护模式页\n(maintenance_mode控制)"]
   end
 
   subgraph M6["管理功能模块（仅管理端）"]
@@ -87,6 +88,7 @@ graph TB
   Mobile --> ApiCfg
   Mobile --> Theme
   Mobile --> GlobalCfg
+  Mobile --> Maintenance
 
   %% 管理端功能映射
   Admin --> Login
@@ -102,6 +104,7 @@ graph TB
   GlobalCfg -.->|控制显示| ApiCfg
   GlobalCfg -.->|控制功能| Login
   GlobalCfg -.->|控制功能| Comment
+  GlobalCfg -.->|控制跳转| Maintenance
 ```
 ```
 
@@ -109,7 +112,7 @@ graph TB
 
 ```mermaid
 flowchart TD
-  S([启动应用]) --> I[拉取全局配置 + 启动版本轮询]
+  S([启动应用]) --> I[拉取全局配置 + 建立系统事件连接]
   I --> R{进入角色}
 
   R -->|普通用户| U[Web/移动端：浏览与互动]
@@ -126,8 +129,8 @@ flowchart TD
   D --> M[用户/视频/评论管理]
   D --> G[系统配置变更（version++）]
 
-  G -.-> V[Web/移动端轮询到新版本]
-  V --> F[强制刷新（reload / reLaunch）]
+  G -.-> V[Web/移动端收到系统事件或回前台补拉]
+  V --> F[按配置触发刷新 / reLaunch / 维护页跳转]
 ```
 
 ## 三、整体项目架构时序图（前端视角）
@@ -143,7 +146,7 @@ sequenceDiagram
   participant API as 后端API
   participant Media as 媒体资源(/media)
 
-  Note over Web,API: 1) 启动：拉取全局配置并轮询版本
+  Note over Web,API: 1) 启动：拉取全局配置并建立系统事件同步
   par Web
     Web->>API: GET /api/configs/global/
     API-->>Web: config + version
@@ -161,14 +164,16 @@ sequenceDiagram
   Web->>Media: GET /media/... (Range)
   Media-->>Web: 206 Partial Content
 
-  Note over A,Mobile: 3) 配置变更：管理员发布 -> 客户端检测并刷新
+  Note over A,Mobile: 3) 配置变更：管理员发布 -> 客户端收到事件或回前台补拉
   A->>Admin: 修改系统配置
   Admin->>API: POST /api/configs/admin/update/
   API-->>Admin: new_version
-  Web->>API: (轮询) GET /api/configs/global/
+  API-->>Web: WebSocket / 系统事件推送
+  Web->>API: GET /api/configs/global/
   API-->>Web: version=new
-  Web->>Web: reload
-  Mobile->>API: (轮询) GET /api/configs/global/
+  Web->>Web: reload / 局部刷新
+  API-->>Mobile: WebSocket / 系统事件推送
+  Mobile->>API: GET /api/configs/global/
   API-->>Mobile: version=new
-  Mobile->>Mobile: reLaunch
+  Mobile->>Mobile: reLaunch / 维护页跳转
 ```
