@@ -1,5 +1,5 @@
 [Unit]
-Description=BS01 Django Backend (Gunicorn) - 2C2G tuned
+Description=BS01 Django Backend (ASGI via Uvicorn) - 2C2G tuned
 After=network.target
 
 [Service]
@@ -10,7 +10,7 @@ WorkingDirectory=/root/BS01/backend
 Environment=PYTHONUNBUFFERED=1
 Environment=DJANGO_SETTINGS_MODULE=backend.settings
 EnvironmentFile=/root/BS01/backend/.env
-ExecStart=/root/BS01/.venv/bin/gunicorn -c /root/BS01/backend/gunicorn.conf.py --bind 127.0.0.1:8000 --workers 2 --threads 2 --max-requests 500 --max-requests-jitter 50 --worker-tmp-dir /dev/shm backend.wsgi:application
+ExecStart=/root/BS01/.venv/bin/uvicorn backend.asgi:application --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers
 Restart=always
 RestartSec=3
 TimeoutStartSec=30

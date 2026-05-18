@@ -1,5 +1,5 @@
 [Unit]
-Description=BS01 Django Backend (Gunicorn)
+Description=BS01 Django Backend (ASGI via Uvicorn)
 After=network.target
 
 [Service]
@@ -10,7 +10,7 @@ WorkingDirectory=__PROJECT_ROOT__/backend
 Environment=PYTHONUNBUFFERED=1
 Environment=DJANGO_SETTINGS_MODULE=backend.settings
 EnvironmentFile=__PROJECT_ROOT__/backend/.env
-ExecStart=__PROJECT_ROOT__/.venv/bin/gunicorn -c __PROJECT_ROOT__/backend/gunicorn.conf.py backend.wsgi:application
+ExecStart=__PROJECT_ROOT__/.venv/bin/uvicorn backend.asgi:application --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers
 Restart=always
 RestartSec=3
 TimeoutStartSec=30
