@@ -1,332 +1,185 @@
-# BS01 后端（仅后端）服务器部署文档（Ubuntu 22.04 / 单机）
+# Current Backend Deployment
 
-本文档仅覆盖 **后端 API** 在服务器上的部署。
+这份文档描述的是当前这台机器更接近真实状态的后端部署方式。
 
-- **后端代码目录**：`/root/BS01/backend`
-- **Gunicorn 监听**：`127.0.0.1:8000`
-- **对外访问**：推荐通过 Nginx 反代到 `:8000`（以及可选静态直出 `/media/`）
-- **异步任务**：Celery + Celery Beat（建议一起部署，否则转码/生成缩略图/上传会话清理不会完整工作）
+## 当前状态
 
-> 说明：本仓库是主仓库 + submodule 结构。后端是 submodule：`/root/BS01/backend`。
+当前仓库对应机器已经按下面方式运行：
 
----
+- 项目根目录：`/root/BS01`
+- 后端进程：`uvicorn backend.asgi:application`
+- systemd 服务名：`bs01-gunicorn.service`
+- 监听地址：`0.0.0.0:8000`
+- HTTP 健康检查：`/api/health/`
+- WebSocket：`/ws/system-events/`
+- `nginx`：可选，不再是必需依赖
 
-## 0. 你需要准备的信息
+直接访问形式：
 
-- **服务器公网 IP**（假设为 `<SERVER_IP>`）
-- 你希望 API 使用的域名：
-  - 推荐：`api.bs01.local`（用于 hosts 虚拟域名）或你的真实域名（如 `api.example.com`）
-- PostgreSQL 连接信息：
-  - 数据库名（如 `bs01`）
-  - 用户名（如 `bs01`）
-  - 密码
-- Redis 连接信息（单机可用 `redis://127.0.0.1:6379/0`）
+- HTTP: `http://<SERVER_IP>:8000`
+- API: `http://<SERVER_IP>:8000/api/...`
+- WebSocket: `ws://<SERVER_IP>:8000/ws/system-events/`
 
----
+当前前端默认不会强制写死固定 IP，而是：
 
-## 1. 安装系统依赖（服务器执行）
+- Web 前台优先读取 `VUE_APP_API_BASE` 或 `localStorage.api_base`
+- 管理后台优先读取 `localStorage.api_base` 或 `window.__API_BASE__`
+- 如果都没有，再按当前访问域名推导 `api.*`
 
-```bash
-sudo apt update
-sudo apt install -y \
-  python3-venv python3-dev build-essential \
-  postgresql postgresql-contrib \
-  redis-server \
-  nginx \
-  ffmpeg \
-  ca-certificates curl git
-```
+如果服务器域名、IP 或入口方式变化，要同步检查：
 
-### 1.1 安装 Python 3.12（Django 6 需要）
+- [../web-client/src/api.js](/root/BS01/web-client/src/api.js:1)
+- [../admin-console/src/lib/http.js](/root/BS01/admin-console/src/lib/http.js:1)
+- [../backend/.env](/root/BS01/backend/.env:1)
 
-```bash
-sudo apt install -y software-properties-common
-sudo add-apt-repository -y ppa:deadsnakes/ppa
-sudo apt update
-sudo apt install -y python3.12 python3.12-venv python3.12-dev
-python3.12 --version
-```
+## 适用场景
 
----
+适合：
 
-## 2. 拉取代码（含 submodule）
+- 单机部署
+- 内网或固定 IP 访问
+- 不想依赖 `nginx`
+- 需要 WebSocket 直接可用
 
-首次部署：
+不适合：
 
-```bash
-sudo git clone --recurse-submodules git@github.com:3198073725/BS01.git /root/BS01
-```
+- 你准备直接上公网 `443` 和正式 TLS
+- 你需要统一托管多个域名、多个前端入口
 
-如果你已经 clone 过：
+这些场景通常还是应该在前面放 `nginx` 或其他反向代理。
+
+## 关键文件
+
+- systemd 模板：
+  [systemd/bs01-gunicorn.service](/root/BS01/2H2G3M/systemd/bs01-gunicorn.service:1)
+- nginx 可选配置：
+  [nginx/bs01.conf](/root/BS01/2H2G3M/nginx/bs01.conf:1)
+- 前端静态发布脚本：
+  [scripts/deploy_frontend_static.sh](/root/BS01/2H2G3M/scripts/deploy_frontend_static.sh:1)
+
+## 最小部署步骤
+
+### 1. 安装依赖
 
 ```bash
 cd /root/BS01
-sudo git pull
-sudo git submodule update --init --recursive
+python3 -m venv .venv
+./.venv/bin/pip install -U pip
+./.venv/bin/pip install -r requirements.txt
 ```
 
----
-
-## 3. 配置数据库（PostgreSQL）
-
-### 3.1 创建数据库与用户（服务器执行）
+如果需要转码：
 
 ```bash
-sudo -u postgres psql
+apt install -y ffmpeg redis-server postgresql
 ```
 
-在 `psql` 中执行（示例，可按需改名/改密码）：
-
-```sql
-CREATE DATABASE bs01;
-CREATE USER bs01 WITH PASSWORD 'REPLACE_WITH_STRONG_PASSWORD';
-ALTER ROLE bs01 SET client_encoding TO 'utf8';
-ALTER ROLE bs01 SET default_transaction_isolation TO 'read committed';
-ALTER ROLE bs01 SET timezone TO 'Asia/Shanghai';
-GRANT ALL PRIVILEGES ON DATABASE bs01 TO bs01;
-\q
-```
-
----
-
-## 4. 创建 Python 虚拟环境并安装依赖
-
-后端目录：`/root/BS01/backend`
+### 2. 配置环境变量
 
 ```bash
-cd /root/BS01/backend
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -r requirements.txt
+cp /root/BS01/2H2G3M/env/backend.env.production.example /root/BS01/backend/.env
 ```
 
----
+至少修改这些变量：
 
-## 5. 配置后端环境变量（强烈推荐使用 `.env`）
-
-后端会读取：`/root/BS01/backend/.env`
-
-你可以以示例文件为模板：
-
-- 示例文件：`/root/BS01/2H2G3M/env/backend.env.production.example`
-
-### 5.1 创建 `.env`
-
-```bash
-cd /root/BS01/backend
-cp /root/BS01/2H2G3M/env/backend.env.production.example .env
-```
-
-### 5.2 必改项（最少）
-
-编辑 `/root/BS01/backend/.env`，重点检查并填写：
-
-- `SECRET_KEY=...`
+- `SECRET_KEY`
 - `DEBUG=false`
-- `ALLOWED_HOSTS=...`
-- `REDIS_URL=redis://127.0.0.1:6379/0`
-- `SITE_URL=http://api.bs01.local`
-- `SERVE_MEDIA=false`
-- `VIDEO_MAX_SIZE_BYTES=209715200`
+- `ALLOWED_HOSTS`
+- `SITE_URL`
+- `DB_*`
+- `REDIS_URL`
+- `CORS_ALLOWED_ORIGINS`
+- `CSRF_TRUSTED_ORIGINS`
 
-### 5.3 重要：媒体目录（解决 /media 404 的关键）
+如果你继续使用“直连 IP:8000”的方式，`SITE_URL` 和前端允许来源也应该写成对应的 IP 地址与端口。
 
-默认配置就是 `/root/BS01/backend/media`。如果你要改路径，再额外设置：
-
-```bash
-MEDIA_ROOT=/root/BS01/media
-MEDIA_URL=/media/
-```
-
-并确保目录存在：
-
-```bash
-sudo mkdir -p /root/BS01/media/videos
-sudo mkdir -p /root/BS01/media/videos/thumbs
-sudo mkdir -p /root/BS01/media/videos/low
-sudo mkdir -p /root/BS01/media/videos/hls
-sudo chown -R root:root /root/BS01/media
-sudo chmod -R 755 /root/BS01/media
-```
-
-> 注意：如果你用非 root 用户运行 gunicorn/celery，需要把目录权限改成对应用户。
-
----
-
-## 6. 初始化数据库（迁移 + 超级管理员）
+## 3. 初始化数据库
 
 ```bash
 cd /root/BS01/backend
-source .venv/bin/activate
-python manage.py migrate
-python manage.py createsuperuser
+../.venv/bin/python manage.py migrate
+../.venv/bin/python manage.py createsuperuser
 ```
 
----
+## 4. 安装当前机器使用的 systemd 单元
 
-## 7. 本地验证（不启 systemd，先跑通一次）
+当前这台机器不是用 `deploy/systemd/` 通用模板，而是直接用 `2H2G3M/systemd/` 里的固定路径模板。
 
-```bash
-cd /root/BS01/backend
-source .venv/bin/activate
-python manage.py runserver 0.0.0.0:8000
-```
-
-在你电脑上访问：
-
-- `http://<SERVER_IP>:8000/api/health/`
-
-能返回 `{"status":"ok"}` 说明 API 起得来。
-
-按 `Ctrl+C` 退出。
-
----
-
-## 8. 使用 systemd 启动 Gunicorn（生产推荐）
-
-仓库已提供 systemd unit 模板：
-
-- `2H2G3M/systemd/bs01-gunicorn.service`
-- `2H2G3M/systemd/bs01-celery.service`
-- `2H2G3M/systemd/bs01-celery-transcode.service`
-- `2H2G3M/systemd/bs01-celery-beat.service`
-
-### 8.1 安装 unit 文件
+安装方式：
 
 ```bash
 cd /root/BS01
-sudo bash 2H2G3M/scripts/install_systemd_units.sh
+bash 2H2G3M/scripts/install_systemd_units.sh
+systemctl daemon-reload
+systemctl enable bs01-gunicorn bs01-celery bs01-celery-transcode bs01-celery-beat
+systemctl restart bs01-gunicorn bs01-celery bs01-celery-transcode bs01-celery-beat
 ```
 
-### 8.2 启动并设置开机自启
+## 5. 验证服务
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable bs01-gunicorn
-sudo systemctl start bs01-gunicorn
-sudo systemctl status bs01-gunicorn --no-pager
+systemctl status bs01-gunicorn --no-pager
+ss -ltnp | rg ':8000 '
+curl -i http://127.0.0.1:8000/api/health/
 ```
 
-### 8.3 查看日志
+预期：
+
+- `bs01-gunicorn.service` 为 `active (running)`
+- `ss` 显示 `0.0.0.0:8000`
+- 健康检查返回 `200 OK`
+
+## 6. 验证 WebSocket
+
+只要后端跑的是 ASGI，这条链路就不依赖 `nginx`。
+
+浏览器应连接：
+
+- `ws://<SERVER_IP>:8000/ws/system-events/`
+
+如果要本机验证，最简单的判断标准是后端日志会出现：
+
+- WebSocket accepted / connection open
+
+## 7. 防火墙
+
+如果要让外部机器直接访问，别忘了放行 `8000/tcp`。
+
+UFW 示例：
 
 ```bash
-sudo journalctl -u bs01-gunicorn -n 200 --no-pager
-sudo journalctl -u bs01-gunicorn -f
+ufw allow 8000/tcp
+ufw status
 ```
 
----
+## 8. 前端说明
 
-## 9.（强烈推荐）部署 Celery（否则转码/缩略图等不会异步执行）
+当前前端默认 API 基址不是固定 IP，而是“显式配置优先，否则按当前域名推导”。
+
+这意味着：
+
+- 如果你把 `web.` / `admin.` / `mobile.` 与 `api.` 放在同一套域名体系下，通常不用改代码默认值
+- 如果你使用非常规入口，仍然可以通过环境变量、`window.__API_BASE__` 或浏览器存储覆盖
+
+重新构建与发布：
 
 ```bash
-sudo systemctl enable bs01-celery bs01-celery-transcode bs01-celery-beat
-sudo systemctl start bs01-celery bs01-celery-transcode bs01-celery-beat
-sudo systemctl status bs01-celery --no-pager
-
-sudo systemctl status bs01-celery-transcode --no-pager
-sudo systemctl status bs01-celery-beat --no-pager
+cd /root/BS01/web-client && npm run build
+cd /root/BS01/admin-console && npm run build
+cd /root/BS01 && python3 bs01ctl.py deploy-frontend-static
 ```
 
-查看日志：
+## 9. 如果以后重新启用 nginx
 
-```bash
-sudo journalctl -u bs01-celery -n 200 --no-pager
-sudo journalctl -u bs01-celery-transcode -n 200 --no-pager
-sudo journalctl -u bs01-celery-beat -n 200 --no-pager
-```
+这不是必须，但在下面场景会有价值：
 
----
+- 需要 `80/443`
+- 需要域名
+- 需要 TLS/HTTPS
+- 需要把静态文件和 API 统一到一个入口
 
-## 10. Nginx（可选，但推荐）
+这时可以使用：
 
-如果你希望从 80 端口访问 API：
+- [nginx/bs01.conf](/root/BS01/2H2G3M/nginx/bs01.conf:1)
 
-- 让 Nginx 监听 `:80`
-- 反向代理 `/api/` 到 `http://127.0.0.1:8000`
-- （可选）直接从磁盘直出 `/media/`（性能更好）
-
-本仓库提供示例：`2H2G3M/nginx/bs01.conf`。
-
-安装示例配置：
-
-```bash
-cd /root/BS01
-sudo bash 2H2G3M/scripts/install_nginx_conf.sh
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-如果你启用了 `/static/` 直出，别漏掉：
-
-```bash
-cd /root/BS01/backend
-source .venv/bin/activate
-python manage.py collectstatic --noinput
-```
-
----
-
-## 11. 常见问题排查
-
-### 11.1 `/media/...` 访问 404
-
-优先检查：
-
-- Django `MEDIA_ROOT` 是否指向你真实存储目录
-  - 如果你期望是 `/root/BS01/media`，则 `.env` 必须有 `MEDIA_ROOT=/root/BS01/media`
-- 该文件是否真实存在：
-
-```bash
-ls -la /root/BS01/media/videos/
-```
-
-- Gunicorn 是否读取了正确的环境变量（systemd 环境）
-  - `systemctl cat bs01-gunicorn` 查看 unit 的 `Environment=` 或 `EnvironmentFile=`
-  - 修改 unit 后执行：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart bs01-gunicorn
-```
-
-### 11.2 上传成功但 Celery 不转码
-
-检查：
-
-- Redis 是否运行：`systemctl status redis-server`
-- worker 是否运行：`systemctl status bs01-celery`
-- Celery 日志里是否能看到 `tasks.transcode_video_to_hls received`
-
-### 11.3 Gunicorn 启动失败
-
-看日志：
-
-```bash
-sudo journalctl -u bs01-gunicorn -n 200 --no-pager
-```
-
-常见原因：
-
-- `.env` 缺少 `SECRET_KEY`
-- 数据库连不上（`DATABASE_URL` 错、pg 未启动、密码错）
-- 依赖未安装（requirements）
-
----
-
-## 12. 升级流程（以后更新代码）
-
-```bash
-cd /root/BS01
-sudo git pull
-sudo git submodule update --init --recursive
-
-cd /root/BS01/backend
-source .venv/bin/activate
-pip install -r requirements.txt
-python manage.py migrate
-
-sudo systemctl restart bs01-gunicorn
-sudo systemctl restart bs01-celery
-sudo systemctl restart bs01-celery-transcode
-```
+但要明确：`nginx` 只是入口层，不是 WebSocket 是否可用的前提。

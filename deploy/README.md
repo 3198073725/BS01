@@ -1,80 +1,185 @@
-# BS01 Deployment Guide
+# Deployment Guide
 
-This document lists production-critical environment variables and a minimal deployment checklist using systemd + Gunicorn + Celery. Frontend development servers are documented separately and are not part of the production service set.
+这份文档描述的是 `deploy/` 目录下的通用部署模板，不是当前机器的唯一真实状态。
 
-## Environment variables (see deploy/env.example)
-- Backend core
-  - SECRET_KEY (required)
-  - DEBUG (false for production)
-  - ALLOWED_HOSTS (comma-separated)
-  - SITE_URL (public API base, e.g. https://api.example.com)
-  - MEDIA_URL (/media or absolute CDN URL)
-- Auth
-  - API_ENABLE_SESSION_AUTH (default false)
-  - REFRESH_TOKEN_LIFETIME_DAYS (default 60)
-- Email
-  - CONTACT_EMAIL_TO (required for contact form)
-  - ADMIN_EMAIL_LIST (optional comma-separated)
-  - EMAIL_HOST, EMAIL_PORT, EMAIL_HOST_USER, EMAIL_HOST_PASSWORD, EMAIL_USE_TLS
-  - DEFAULT_FROM_EMAIL
-- Database (PostgreSQL recommended)
-  - DB_ENGINE, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_CONN_MAX_AGE
-- Cache / Celery / Redis
-  - REDIS_URL, USE_REDIS_CACHE
-  - CELERY_BROKER_URL, CELERY_RESULT_BACKEND
-  - CELERY_TASK_ALWAYS_EAGER=false (ensure async in prod)
-- CORS / CSRF
-  - CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS
-  - CORS_ALLOW_CREDENTIALS
-- Security (when DEBUG=false)
-  - SECURE_HSTS_SECONDS, SECURE_SSL_REDIRECT, USE_X_FORWARDED_PROTO
-- Uploads / Throttles
-  - VIDEO_MAX_SIZE_BYTES
-  - THROTTLE_* (see env.example for full list)
+先看清这一点：
 
-## Minimal deployment steps
-1) Setup OS deps (example on Ubuntu):
-   - apt install -y python3-venv python3-dev build-essential nginx redis-server
-2) Create virtualenv and install deps:
-   - PROJECT_ROOT=/srv/vidsprout
-   - python3 -m venv "$PROJECT_ROOT/.venv"
-   - "$PROJECT_ROOT/.venv/bin/pip" install -U pip
-   - "$PROJECT_ROOT/.venv/bin/pip" install -r "$PROJECT_ROOT/requirements.txt"
-3) Configure environment:
-   - cp deploy/env.example backend/.env
-   - Edit backend/.env to your values (SECRET_KEY, DB_*, REDIS_*, SITE_URL, CORS_*)
-4) Initialize database:
-   - cd "$PROJECT_ROOT/backend"; "$PROJECT_ROOT/.venv/bin/python" manage.py migrate
-   - (optional) cd "$PROJECT_ROOT/backend"; "$PROJECT_ROOT/.venv/bin/python" manage.py createsuperuser
-5) Static/media
-   - If using object storage, point MEDIA_URL to CDN and keep MEDIA_ROOT for worker temp.
-   - For local storage, serve MEDIA_ROOT via Nginx (see sample below).
-6) Systemd services
-   - Gunicorn: deploy/systemd/bs01-gunicorn.service
-   - Celery worker: deploy/systemd/bs01-celery.service
-   - Celery transcode worker: deploy/systemd/bs01-celery-transcode.service
-   - Celery beat: deploy/systemd/bs01-celery-beat.service
-   - Enable & start:
-     - systemctl daemon-reload
-     - systemctl enable bs01-gunicorn bs01-celery bs01-celery-transcode bs01-celery-beat
-     - systemctl start bs01-gunicorn bs01-celery bs01-celery-transcode bs01-celery-beat
-   - Templates under `deploy/systemd/` use placeholders and are rendered by `bs01ctl.py setup-services`.
-     Common overrides:
-     - `python3 bs01ctl.py setup-services --service-user bs01 --service-group bs01`
-     - `python3 bs01ctl.py setup-services --project-root /srv/vidsprout`
-   - Helper script equivalents:
-     - `deploy/scripts/install_systemd.sh --service-user bs01 --service-group bs01`
-     - `deploy/scripts/install_systemd.sh --project-root /srv/vidsprout --include-frontend-dev`
-7) Nginx (very brief sketch)
-   - proxy_pass to 127.0.0.1:8000 for API
-   - serve /media/ from backend MEDIA_ROOT (local) or set appropriate caching headers if MEDIA_URL is CDN
-   - enable gzip and HLS range requests for .ts/.m3u8 as needed
+- `deploy/systemd/` 是通用模板
+- 模板实际运行的是 `uvicorn backend.asgi:application`
+- 它既可以直接监听 `:8000`，也可以放在 `nginx`、反向代理或其他入口层后面
+- 如果你要“后端直接对外监听 `0.0.0.0:8000`，完全不依赖 nginx”，优先看 [../2H2G3M/BACKEND_DEPLOY.md](/root/BS01/2H2G3M/BACKEND_DEPLOY.md)
 
-## Notes
-- Use a non-root user in systemd services in production (User=bs01, Group=bs01) and set proper permissions.
-- Frontend dev-server units live under `deploy/systemd-dev/`, use the same placeholder rendering, and should only be installed when you explicitly want long-running development servers on the host.
-- For object storage, views already use default_storage.url/exists; Celery tasks assume local files under MEDIA_ROOT. If storing originals remotely, add a download-to-temp step before ffmpeg/ffprobe and upload results afterwards.
-- Ensure CORS_ALLOWED_ORIGINS and CSRF_TRUSTED_ORIGINS are correctly set for your frontends.
-- `backup.sh` saves both rendered production unit files (`systemd.tgz`) and the render context (`systemd-render.env`).
-- `restore.sh` defaults to re-rendering systemd units for the current machine. Only use `--reuse-systemd-render` when restoring onto a host with the same project path, user/group, and npm layout.
-- `restore.sh --include-frontend-dev` will also reinstall/start the frontend dev units and run the expanded doctor checks.
+## 目录说明
+
+- `env.example`
+  后端 `.env` 示例。
+- `systemd/`
+  生产服务模板。
+- `systemd-dev/`
+  可选的前端开发服务模板。
+- `scripts/`
+  安装系统依赖、安装 systemd、备份、恢复脚本。
+
+## 这套模板适合什么场景
+
+适合：
+
+- 你要部署到新机器
+- 你需要可渲染的 systemd 模板
+- 你可能会使用自定义项目路径、用户或组
+- 你可能会把服务放到 `nginx` 或其他入口层后面
+
+不适合直接照搬的场景：
+
+- 你只想完全复刻当前 `/root/BS01` 这台机器的固定路径部署
+
+## 关键环境变量
+
+参考 [env.example](/root/BS01/deploy/env.example:1)。
+
+核心变量：
+
+- `SECRET_KEY`
+- `DEBUG`
+- `ALLOWED_HOSTS`
+- `SITE_URL`
+- `MEDIA_URL`
+- `DB_ENGINE`
+- `DB_NAME`
+- `DB_USER`
+- `DB_PASSWORD`
+- `DB_HOST`
+- `DB_PORT`
+- `REDIS_URL`
+- `CELERY_BROKER_URL`
+- `CELERY_RESULT_BACKEND`
+- `CORS_ALLOWED_ORIGINS`
+- `CSRF_TRUSTED_ORIGINS`
+
+如果前端域名和 API 域名不一致，`CORS_ALLOWED_ORIGINS` 与 `CSRF_TRUSTED_ORIGINS` 一定要配置正确。
+
+## 通用最小部署流程
+
+### 1. 安装系统依赖
+
+Ubuntu 示例：
+
+```bash
+apt install -y python3-venv python3-dev build-essential nginx redis-server
+```
+
+如果机器还负责转码，额外安装：
+
+```bash
+apt install -y ffmpeg
+```
+
+### 2. 创建虚拟环境并安装依赖
+
+```bash
+PROJECT_ROOT=/srv/vidsprout
+python3 -m venv "$PROJECT_ROOT/.venv"
+"$PROJECT_ROOT/.venv/bin/pip" install -U pip
+"$PROJECT_ROOT/.venv/bin/pip" install -r "$PROJECT_ROOT/requirements.txt"
+```
+
+### 3. 配置 `.env`
+
+```bash
+cp deploy/env.example backend/.env
+```
+
+然后修改：
+
+- `SECRET_KEY`
+- `DB_*`
+- `REDIS_URL`
+- `SITE_URL`
+- `ALLOWED_HOSTS`
+- `CORS_ALLOWED_ORIGINS`
+- `CSRF_TRUSTED_ORIGINS`
+
+### 4. 初始化数据库
+
+```bash
+cd "$PROJECT_ROOT/backend"
+"$PROJECT_ROOT/.venv/bin/python" manage.py migrate
+"$PROJECT_ROOT/.venv/bin/python" manage.py createsuperuser
+```
+
+### 5. 安装 systemd 单元
+
+推荐用 `bs01ctl.py` 渲染安装：
+
+```bash
+python3 bs01ctl.py setup-services --enable
+```
+
+常见覆盖方式：
+
+```bash
+python3 bs01ctl.py setup-services --service-user bs01 --service-group bs01
+python3 bs01ctl.py setup-services --project-root /srv/vidsprout
+```
+
+也可以使用脚本：
+
+```bash
+deploy/scripts/install_systemd.sh --service-user bs01 --service-group bs01
+```
+
+### 6. 启动服务
+
+```bash
+systemctl daemon-reload
+systemctl enable bs01-gunicorn bs01-celery bs01-celery-transcode bs01-celery-beat
+systemctl start bs01-gunicorn bs01-celery bs01-celery-transcode bs01-celery-beat
+```
+
+## systemd 模板说明
+
+`deploy/systemd/` 中包含：
+
+- `bs01-gunicorn.service`
+- `bs01-celery.service`
+- `bs01-celery-transcode.service`
+- `bs01-celery-beat.service`
+
+注意：
+
+- `bs01-gunicorn.service` 这个名字是历史遗留
+- 模板实际运行的是 `uvicorn backend.asgi:application`
+- 这保证了 `/ws/system-events/` 可以工作
+
+## nginx 说明
+
+如果你选择反向代理模式，通常前面还要配 `nginx`：
+
+- `/api/` 反代到 `127.0.0.1:8000`
+- `/ws/` 反代到 `127.0.0.1:8000`
+- `/media/` 由 nginx 直出或转到对象存储/CDN
+
+WebSocket 代理必须带：
+
+```nginx
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+## WebSocket 说明
+
+项目的系统配置同步使用：
+
+- `/ws/system-events/`
+
+因此：
+
+- 后端必须跑 ASGI
+- 不能退回 `backend.wsgi:application`
+- 只要入口层正确转发，WebSocket 不要求必须使用 nginx，本质上要求的是 ASGI 链路可达
+
+## 与当前机器的差异
+
+当前仓库里的实际机器使用的是固定路径的 `2H2G3M/` 资料。
+
+而这份 `deploy/README.md` 描述的是更通用的“可渲染模板部署”。不要把两者混为一谈。

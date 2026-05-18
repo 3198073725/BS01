@@ -1,125 +1,87 @@
-# VidSprout | 开源视频平台（Monorepo）
+# VidSprout Monorepo
 
-VidSprout 是一个现代化、可二次开发的视频平台项目。本仓库为 **主仓库（Monorepo）**，用于统一管理后端、Web 前台、管理后台、移动端以及部署脚本。
+VidSprout 是一个视频平台 monorepo，包含后端 API、Web 前台、管理后台、移动端和部署脚本。
 
-> 说明：历史仓库名/域名中可能仍存在 `BS01`（例如 `.gitmodules`、本地域名 `bs01.local` 等），但产品对外品牌已统一为 **VidSprout**。
+仓库里仍然保留了部分历史命名 `BS01`。当前可以按下面理解：
 
----
+- 产品名：`VidSprout`
+- 仓库历史名/脚本名/服务名：`BS01`
+- `bs01-gunicorn.service` 这个名字是历史遗留，实际运行进程已经是 `uvicorn`（ASGI），不是 WSGI Gunicorn
+
+## 文档入口
+
+- 总览：当前文件
+- 通用部署说明：[deploy/README.md](/root/BS01/deploy/README.md)
+- 当前单机直连 ASGI 部署：[2H2G3M/BACKEND_DEPLOY.md](/root/BS01/2H2G3M/BACKEND_DEPLOY.md)
+- 2C2G/3M 部署资料说明：[2H2G3M/README.md](/root/BS01/2H2G3M/README.md)
+- 后端模块：[backend/README.md](/root/BS01/backend/README.md)
+- Web 前台：[web-client/README.md](/root/BS01/web-client/README.md)
+- 管理后台：[admin-console/README.md](/root/BS01/admin-console/README.md)
+- 移动端：[mobile_uniapp/README.md](/root/BS01/mobile_uniapp/README.md)
 
 ## 目录结构
 
 - `backend/`
-  - Django + DRF 后端 API（认证、视频、互动、通知、转码任务等）
+  Django + DRF + ASGI，提供 API、认证、通知、视频、WebSocket。
 - `web-client/`
-  - Web 前台（桌面端网页）
+  Web 前台。
 - `admin-console/`
-  - 管理后台（运营/审核/内容治理）
+  管理后台。
 - `mobile_uniapp/`
-  - UniApp 移动端（H5/App/小程序）
+  UniApp 移动端。
 - `deploy/`
-  - 生产部署参考（systemd、环境变量模板、Nginx 要点等）
-- `deploy/systemd/`
-  - 生产 systemd 服务单元（Gunicorn / Celery）
-- `deploy/systemd-dev/`
-  - 可选的前端开发用 systemd 单元（Web / Admin / Mobile dev server）
-- `deploy/scripts/`
-  - 部署/运维脚本（安装系统依赖、安装 systemd、备份与恢复等）
-- `bento4/`
-  - Bento4 相关工具/依赖（用于 DASH 打包等能力）
+  通用部署模板与脚本。
+- `2H2G3M/`
+  当前单机生产资料，带固定路径 `/root/BS01` 的服务模板和脚本。
 - `bs01ctl.py`
-  - 项目运维脚本（统一管理后端/前端/systemd/Celery/日志/依赖/迁移等）
-- `requirements.txt`
-  - 主仓库 Python 依赖（主要用于后端部署/运行）
+  统一运维脚本。
 
----
+## 当前建议先这样理解
 
-## 架构概览（推荐部署拓扑）
+这个仓库现在有两条部署路线，之前混乱主要就是因为它们被混写了。
 
-```text
-            ┌──────────────────────────┐
-            │         Web Client        │
-            │   web-client (Vue)        │
-            └────────────┬─────────────┘
-                         │ HTTPS
-                         │
-┌────────────────────────▼────────────────────────┐
-│                    Backend                       │
-│   backend (Django + DRF + SimpleJWT)             │
-│   - API / Auth / Interactions / Notifications    │
-│   - Media: upload / transcode / pack             │
-└───────────────┬──────────────────────┬──────────┘
-                │                      │
-                │ Celery tasks          │ Cache/Broker
-                │                      │
-      ┌─────────▼─────────┐   ┌───────▼────────┐
-      │   Celery Worker    │   │     Redis      │
-      │  (transcode/pack)  │   │ broker/cache   │
-      └─────────┬─────────┘   └────────────────┘
-                │
-                │ DB
-                │
-        ┌───────▼────────┐
-        │   PostgreSQL/   │
-        │     MySQL       │
-        └────────────────┘
+### 1. 当前机器实际运行方式
 
-同时：
-- admin-console 通过后端管理 API 管理内容与用户
-- mobile_uniapp 通过后端 API 完成移动端功能
-```
+这是你现在这台机器的实际状态，也是当前最直接的一种跑法：
 
----
+- 后端：`uvicorn backend.asgi:application`
+- 监听：`0.0.0.0:8000`
+- WebSocket：`/ws/system-events/`
+- `nginx`：不是必须，当前可以完全不依赖它
+- 前端默认 API 基址：优先显式配置，否则按当前访问域名推导 `api.*`
 
-## 子仓库说明（入口文档）
+如果你只是想继续维护这台机器，优先看：
 
-- **后端**：`backend/README.md`
-- **管理端**：`admin-console/README.md`
-- **Web 前台**：`web-client/README.md`
-- **移动端**：`mobile_uniapp/README.md`
+- [2H2G3M/BACKEND_DEPLOY.md](/root/BS01/2H2G3M/BACKEND_DEPLOY.md)
 
-建议先阅读各子仓库 README，再按本文档的「本地开发快速开始」统一启动。
+### 2. 通用模板部署方式
 
----
+`deploy/` 目录里的模板更偏“通用、可渲染、适合别的机器复用”：
 
-## 依赖与环境准备
+- `deploy/systemd/` 是可渲染模板，不绑定固定项目路径或固定用户
+- 模板实际运行的是 `uvicorn backend.asgi:application`
+- 它既可以直连暴露 `:8000`，也可以放在 `nginx` / 反向代理后面
 
-### 必备软件
+如果你准备在另一台机器重新部署，优先看：
 
-- **Python**：3.9+
-- **Node.js**：
-  - admin-console：Node.js 16+（文档按 16+ 编写）
-  - web-client：建议 18+
-- **数据库**：PostgreSQL（推荐）或 MySQL
-- **Redis**：用于缓存、Celery broker、结果存储
+- [deploy/README.md](/root/BS01/deploy/README.md)
 
-### 多媒体工具链（强烈建议）
+## 当前部署模式对照
 
-- **FFmpeg**：用于转码、封面抽帧等
-- **Bento4**：用于 DASH 打包
+| 模式 | 后端监听 | 是否依赖 nginx | 适用场景 |
+|---|---|---:|---|
+| 直连 ASGI | `0.0.0.0:8000` | 否 | 当前机器、内网调试、快速上线 |
+| 反向代理 | 常见为 `0.0.0.0:8000` 或本机回环 | 是 | 域名、80/443、TLS、静态托管 |
 
-> `deploy/README.md` 中也对生产部署依赖做了简要清单。
+重点结论：
 
----
+- WebSocket 不依赖 `nginx`
+- WebSocket 依赖 ASGI
+- 如果页面走 `https://`，WebSocket 也必须走 `wss://`，这时通常还是需要反向代理或证书终止层
 
-## 代码获取与子模块初始化
+## 本地开发快速开始
 
-本仓库包含多个 Git submodule（见 `.gitmodules`）。首次拉取后需要初始化子模块：
-
-```bash
-git submodule update --init --recursive
-```
-
-如果你是首次部署或遇到子仓库为空、缺文件，优先检查 submodule 是否初始化。
-
----
-
-## 本地开发快速开始（全栈）
-
-下面给出一套“能跑起来”的开发顺序：**后端 → Worker → Web/管理端 → 移动端**。
-
-### 1) 后端（backend）
-
-1. 创建虚拟环境并安装依赖（主仓库根目录的 `requirements.txt` 已包含后端相关依赖）：
+### 1. 安装依赖
 
 ```bash
 python3 -m venv .venv
@@ -128,257 +90,113 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-2. 配置环境变量：
+```bash
+cd web-client && npm install
+cd ../admin-console && npm install
+cd ../mobile_uniapp && npm install
+```
 
-- 生产/部署变量模板：`deploy/env.example`
-- 按 `deploy/README.md` 的说明，将其复制为：`backend/.env`
+### 2. 配置环境变量
 
 ```bash
 cp deploy/env.example backend/.env
 ```
 
-然后编辑 `backend/.env`，至少需要配置：
+至少确认这些变量：
 
 - `SECRET_KEY`
-- `DEBUG`（本地可 true，生产必须 false）
+- `DEBUG`
+- `ALLOWED_HOSTS`
 - `DB_*`
 - `REDIS_URL`
-- `CORS_ALLOWED_ORIGINS`、`CSRF_TRUSTED_ORIGINS`（联调前端必须）
+- `CORS_ALLOWED_ORIGINS`
+- `CSRF_TRUSTED_ORIGINS`
 
-3. 数据库迁移与管理账户：
-
-```bash
-cd backend
-python manage.py migrate
-python manage.py createsuperuser
-```
-
-4. 启动后端：
-
-```bash
-python manage.py runserver
-```
-
-> 如果你使用生产方式（Gunicorn + systemd），参考 `deploy/systemd/*` 与 `deploy/README.md`。
-
-### 2) Celery Worker（可选但推荐）
-
-视频转码/切片/打包通常通过 Celery 异步执行。
+### 3. 初始化数据库
 
 ```bash
 cd backend
-celery -A backend worker -l info
+../.venv/bin/python manage.py migrate
+../.venv/bin/python manage.py createsuperuser
 ```
 
-（如有 beat 定时任务，也可启动：`celery -A backend beat -l info`，生产部署参考 `deploy/systemd`。）
+### 4. 启动后端
 
-### 3) Web 前台（web-client）
+开发时可以直接：
+
+```bash
+cd backend
+../.venv/bin/python manage.py runserver 0.0.0.0:8000
+```
+
+如果你要验证 WebSocket / 生产形态，更接近线上的是：
+
+```bash
+cd /root/BS01
+./.venv/bin/uvicorn backend.asgi:application --host 0.0.0.0 --port 8000 --workers 1
+```
+
+### 5. 启动前端
 
 ```bash
 cd web-client
-npm install
 npm run serve
 ```
-
-> 具体脚本以 `web-client/package.json` 为准。
-
-### 4) 管理后台（admin-console）
 
 ```bash
 cd admin-console
-npm install
 npm run serve
 ```
 
-管理端页面标题已设置为「VidSprout 管理后台」（`admin-console/vue.config.js`）。
+## 运维命令
 
-### 5) 移动端（mobile_uniapp）
-
-移动端推荐使用 **HBuilderX** 打开 `mobile_uniapp/` 运行到 H5/App/小程序。
-
-如果项目内包含 npm 依赖：
-
-```bash
-cd mobile_uniapp
-npm install
-```
-
-> 移动端 H5 有全局滚动锁定策略；法律条款页等需要滚动的页面已实现动态解锁逻辑（见 `mobile_uniapp/src/App.vue` 与 `pages/legal/*`）。
-
----
-
-## 默认端口与本地域名（建议约定）
-
-项目中存在一些针对本地域名的便捷逻辑（例如 `admin-console/src/views/Videos.vue` 会将 `admin.` / `api.` 子域切换为 `web.` 并在本地映射到 8080）。
-
-你可以使用类似以下约定（可按需调整）：
-
-- Web 前台：`http://web.bs01.local:8080`
-- 管理后台：`http://admin.bs01.local:8082`
-- 移动端 H5：`http://mobile.bs01.local:5173`
-- 后端 API：`http://api.bs01.local:8000`（或本地 `http://localhost:8000`）
-
-> 重要：`web.bs01.local` 这种访问方式 **不是“开箱即用”**。
-> 
-> - 本地联调：需要在你的 **本机 DNS 或 `/etc/hosts`** 中配置解析，否则浏览器无法访问。
-> - 生产环境：需要在你的 **域名 DNS** 中为 `web/admin/api/mobile` 等子域配置解析，并在 Nginx/网关中完成反代与 HTTPS。
-
-### 本地 hosts 示例（推荐）
-
-将以下内容追加到 `/etc/hosts`（Linux/macOS）或 `C:\\Windows\\System32\\drivers\\etc\\hosts`（Windows）：
-
-```text
-127.0.0.1  api.bs01.local
-127.0.0.1  web.bs01.local
-127.0.0.1  admin.bs01.local
-127.0.0.1  mobile.bs01.local
-```
-
-如果你的服务跑在其他机器（例如局域网服务器 `192.168.1.10`），则把 `127.0.0.1` 改为对应服务器 IP。
-
----
-
-## 部署（生产环境）
-
-生产部署建议阅读：
-
-- `deploy/README.md`
-
-其中包含：
-- 生产关键环境变量清单
-- systemd + Gunicorn + Celery 的最小部署步骤
-- Nginx 配置要点（API 反代、media 静态资源、HLS Range 请求、gzip 等）
-
----
-
-## 运维脚本（强烈建议先看）
-
-本仓库内置了可直接用于服务器运维的脚本，适合“单机部署 + systemd 托管”的场景。
-
-### 1) `bs01ctl.py`（统一运维入口）
-
-`bs01ctl.py` 是一个 Python 运维脚本，封装了常见操作：
-
-- 服务：`status/start/stop/restart/logs`
-- 部署：`install`（安装后端+前端依赖）、`install-os-deps`、`build-frontends`、`deploy-frontend-static`、`install-nginx-conf`、`setup-services`（默认安装生产 systemd 单元）
-- 备份恢复：`backup`、`restore`
-- Django：`migrate/check/collectstatic/test`
-- 体检：`doctor`（默认检查生产服务；可附加前端开发服务检查）
-- 移动端：`uniapp-build-h5`、`uniapp-dev-start/stop/status`
-
-常用示例：
+常用入口是 `bs01ctl.py`：
 
 ```bash
 python3 bs01ctl.py status
 python3 bs01ctl.py restart all
 python3 bs01ctl.py logs backend -f -n 200
-python3 bs01ctl.py install
-python3 bs01ctl.py install-os-deps --db-from-env
+python3 bs01ctl.py migrate
 python3 bs01ctl.py build-frontends
 python3 bs01ctl.py deploy-frontend-static
-python3 bs01ctl.py install-nginx-conf
-python3 bs01ctl.py migrate
-python3 bs01ctl.py setup-services --enable
-python3 bs01ctl.py backup
-python3 bs01ctl.py restore --src /root/BS01-backups/latest
 python3 bs01ctl.py doctor
-python3 bs01ctl.py doctor --include-frontend-dev
 ```
-
-> 注意：脚本默认以当前仓库根目录作为项目路径；涉及 systemd 的操作通常需要 root 权限（非 root 时会尝试使用 sudo）。
-
-### 2) systemd 单元文件：`deploy/systemd/`
-
-包含以下单元（以实际目录为准）：
-
-- `bs01-gunicorn.service`
-- `bs01-celery.service`
-- `bs01-celery-transcode.service`
-- `bs01-celery-beat.service`
-
-你可以使用：
-
-```bash
-python3 bs01ctl.py setup-services --enable
-```
-
-将单元安装到 `/etc/systemd/system/` 并启用启动。
-
-前端开发用服务单元位于 `deploy/systemd-dev/`。只有在你明确希望用 systemd 长驻开发服务器时，才执行：
-
-```bash
-python3 bs01ctl.py setup-services --include-frontend-dev
-```
-
-所有 systemd 模板都会在安装时由 `bs01ctl.py` 渲染项目路径、运行用户/组和 npm 路径。常见覆盖方式：
-
-```bash
-python3 bs01ctl.py setup-services --service-user bs01 --service-group bs01
-python3 bs01ctl.py setup-services --project-root /srv/vidsprout
-```
-
-### 3) 部署脚本：`deploy/scripts/`
-
-该目录提供部署/运维辅助脚本（以实际文件为准）：
-
-- `install_os_deps.sh`：安装系统依赖（Python 构建依赖、Nginx、Redis 等）
-- `install_systemd.sh`：安装/更新 systemd 单元
-- `backup.sh`：备份（通常包含数据库/关键目录）
-- `restore.sh`：恢复备份
 
 说明：
-- `backup.sh` 会额外保存当前生产 systemd 单元和渲染参数快照。
-- `restore.sh` 默认按当前机器重新渲染并安装生产 unit；只有在路径、用户、npm 布局都一致时才应使用 `--reuse-systemd-render`。
 
----
+- `setup-services` 默认使用 `deploy/systemd/` 里的通用模板
+- `install-nginx-conf` 会安装 `2H2G3M/nginx/bs01.conf`
+- 当前机器如果要保持“直连 8000，不依赖 nginx”，不要把 `deploy/systemd/bs01-gunicorn.service` 误当成当前线上状态
 
-## 功能特性说明
+## 当前机器的访问方式
 
-### 热门推荐（Featured Videos）
+按当前仓库里的代码，前端默认会：
 
-管理后台支持配置热门推荐视频，用于在首页展示精选内容：
+- 优先读取显式配置的 API 基址
+- 否则根据当前访问域名推导 `api.*`
+- WebSocket 会基于当前 API 基址自动换算成 `ws://` 或 `wss://`
 
-1. 进入 **系统设置** → **热门推荐** 页面
-2. 输入要推荐的视频 ID（每行一个，按优先级排序）
-3. 设置显示数量（1-20，默认 10）
-4. 保存后配置即时生效
+需要检查的入口：
 
-配置存储在后端 configs 系统中，前端各端（Web/移动端）会通过 `config_version` 机制自动刷新获取最新配置。
+- [web-client/src/api.js](/root/BS01/web-client/src/api.js:1)
+- [admin-console/src/lib/http.js](/root/BS01/admin-console/src/lib/http.js:1)
+- [backend/.env](/root/BS01/backend/.env:1)
 
----
+## FAQ
 
-## 常见问题（FAQ）
+### 为什么有 `deploy/` 和 `2H2G3M/` 两套东西？
 
-### 1) 子仓库目录为空 / 找不到文件？
-- 先执行：`git submodule update --init --recursive`
+因为一套是通用模板，一套是这台单机的落地资料。之前两套文档混在一起写，才会显得混乱。
 
-### 2) 前端跨域 / 登录态异常？
-- 检查 `backend/.env`：
-  - `CORS_ALLOWED_ORIGINS`
-  - `CSRF_TRUSTED_ORIGINS`
-  - `ALLOWED_HOSTS`
-- 确保前端访问的 API base 与后端 `SITE_URL` 等配置一致
+### 现在 WebSocket 到底依不依赖 nginx？
 
-### 3) 视频转码不工作 / 没有生成播放文件？
-- 确认已启动 Celery worker
-- 检查 Redis 是否可用
-- 检查服务器是否安装 FFmpeg/Bento4 且已加入 PATH
+不依赖。依赖的是 ASGI。
 
-### 4) H5 页面无法滚动？
-- 移动端 H5 为了防止页面抖动，可能会锁定 `html, body`。
-- 需要滚动的页面请采用项目内已实现的“动态解锁”方案（法律条款页面已处理）。
+### 现在服务名为什么还叫 `bs01-gunicorn`？
 
----
+只是 unit 名字没改，实际进程已经是 `uvicorn backend.asgi:application`。
 
-## 贡献指南
+### 如果我要重新梳理部署，先看哪份？
 
-欢迎提交 Issue / PR：
-- 功能改动尽量拆分为小 PR
-- 保持各子仓库 README 同步更新
-- 涉及接口变更时，请同步更新前端调用与说明文档
-
----
-
-## License
-
-本仓库包含多个子模块，**不同模块可能存在不同许可**。请以各子仓库根目录的 `LICENSE` / `README` 声明为准。
+- 维护当前机器：看 [2H2G3M/BACKEND_DEPLOY.md](/root/BS01/2H2G3M/BACKEND_DEPLOY.md)
+- 部署到新机器：看 [deploy/README.md](/root/BS01/deploy/README.md)
