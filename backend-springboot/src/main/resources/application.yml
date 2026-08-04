@@ -1,0 +1,126 @@
+spring:
+  application:
+    name: vidsprout-backend
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/bs01}
+    username: ${DB_USER:bs01}
+    password: ${DB_PASSWORD:bs01}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 300000
+      connection-timeout: 20000
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    open-in-view: false
+
+  flyway:
+    enabled: false
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 3000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 4
+
+  mail:
+    host: ${MAIL_HOST:smtp.example.com}
+    port: ${MAIL_PORT:587}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          ssl:
+            enable: ${MAIL_SSL:false}
+          starttls:
+            enable: ${MAIL_STARTTLS:true}
+    default-encoding: UTF-8
+    from: ${MAIL_FROM:VidSprout <noreply@vidsprout.com>}
+
+  servlet:
+    multipart:
+      max-file-size: 512MB
+      max-request-size: 512MB
+
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    default-property-inclusion: non_null
+    property-naming-strategy: SNAKE_CASE
+
+server:
+  port: ${SERVER_PORT:8000}
+  forward-headers-strategy: framework
+
+app:
+  jwt:
+    secret: ${JWT_SECRET:change-me-in-production-use-at-least-256-bits}
+    access-token-expiration: 604800000
+    refresh-token-expiration: 5184000000
+  video:
+    max-size-bytes: 524288000
+    allowed-extensions: .mp4,.mov,.m4v,.webm,.mkv
+  upload:
+    dir: ${MEDIA_ROOT:./media}
+    chunk-size: 8388608
+  contact:
+    email-to: ${CONTACT_EMAIL_TO:}
+  config:
+    cache-ttl-seconds: 300
+  rate-limit:
+    enabled: true
+    anonymous: 200
+    authenticated: 2000
+
+logging:
+  level:
+    root: INFO
+    com.vidsprout: DEBUG
+    org.springframework.security: INFO
+
+springdoc:
+  api-docs:
+    path: /api/schema
+  swagger-ui:
+    path: /api/schema/swagger-ui
+  paths-to-match: /api/**
+
+---
+spring:
+  config:
+    activate:
+      on-profile: test
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+  data:
+    redis:
+      host: localhost
+      port: 6379

@@ -1,0 +1,20 @@
+# 大幅缩小 web 服务构建上下文
+**/node_modules
+**/target
+**/dist
+**/.git
+backend/
+2H2G3M/
+mobile_uniapp/
+bento4/
+docs/
+media/
+*.zip
+*.sql
+dump.rdb
+start.sh
+BS01.md
+CHANGELOG.md
+README.md
+requirements.txt
+test_bs01ctl.py

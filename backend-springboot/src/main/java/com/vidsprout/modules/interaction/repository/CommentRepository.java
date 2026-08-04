@@ -1,0 +1,14 @@
+package com.vidsprout.modules.interaction.repository;
+
+import com.vidsprout.modules.interaction.model.Comment;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+import java.util.UUID;
+
+@Repository
+public interface CommentRepository extends JpaRepository<Comment, UUID> {
+    Page<Comment> findByVideoIdAndParentIsNullOrderByCreatedAtDesc(UUID videoId, Pageable pageable);
+    Page<Comment> findByParentIdOrderByCreatedAtAsc(UUID parentId, Pageable pageable);
+}

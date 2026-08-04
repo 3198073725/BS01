@@ -20,3 +20,11 @@ node_modules/
 # IDE
 .idea/
 .vscode/
+
+# Java build output
+backend-springboot/target/
+backend-springboot/logs/
+
+# Runtime data
+dump.rdb
+media/

@@ -4,29 +4,33 @@
 BS01 项目运维脚本（Python 版）
 
 用途：统一管理后端与前端的运行、日志、依赖、迁移、测试与体检。
-- 生产服务：Django + Gunicorn + Celery（systemd）
+- 生产后端：Spring Boot（systemd 单元 bs01-backend.service，或 docker compose）
+- 开发后端：自动检测端口 8000 进程，支持 start/stop/restart/status/logs
 - 开发辅助：Web/Admin/Mobile 前端 dev server（可选 systemd）
 
 示例：
   python bs01ctl.py status                 # 查看全部服务状态
   python bs01ctl.py restart all            # 重启全部服务
   python bs01ctl.py logs backend -f -n 200 # 实时查看后端日志
-  python bs01ctl.py install                # 安装后端与前端依赖
-  python bs01ctl.py migrate                # 执行数据库迁移（PostgreSQL）
-  python bs01ctl.py test apps --keepdb     # 运行测试（使用 pg 测试库）
+  python bs01ctl.py install                # 安装后端（Maven）与前端（npm）依赖
+  python bs01ctl.py migrate                # 执行 Flyway 数据库迁移（PostgreSQL）
+  python bs01ctl.py test                   # 运行后端测试（mvn test）
   python bs01ctl.py doctor                 # 体检：默认检查生产服务
   python bs01ctl.py doctor --include-frontend-dev  # 附加检查前端开发服务
+  python bs01ctl.py deploy                 # docker compose 生产部署（包装 deploy/up.sh）
 
 注意：本脚本默认以当前仓库根目录为项目根；涉及 systemd 的操作通常需要 root 权限，若非 root 将尝试使用 sudo。
 """
 
 import argparse
 import os
+import signal
 import sys
 import subprocess
 import shlex
 import socket
 import shutil
+import time
 import http.client
 import re
 from urllib.parse import urlparse
@@ -35,31 +39,29 @@ import grp
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-VENV_PY = BASE_DIR / '.venv' / 'bin' / 'python'
-VENV_PIP = BASE_DIR / '.venv' / 'bin' / 'pip'
-CELERY_BIN = BASE_DIR / '.venv' / 'bin' / 'celery'
-MANAGE_PY = BASE_DIR / 'backend' / 'manage.py'
-ENV_FILE = BASE_DIR / 'backend' / '.env'
+SPRINGBOOT_DIR = BASE_DIR / 'backend-springboot'
+BACKEND_ENV_FILE = SPRINGBOOT_DIR / '.env'
+MAVEN_BIN = shutil.which('mvn') or 'mvn'
+BACKEND_HEALTH_URL = 'http://localhost:8000/api/health/'
+BACKEND_PORT = 8000
+BACKEND_PID_FILE = Path('/tmp/bs01_backend.pid')
+BACKEND_LOG_FILE = Path('/tmp/bs01_backend.log')
+DEV_BACKEND_PROFILE = 'dev'
+DOCKER_COMPOSE_FILE = BASE_DIR / 'docker-compose.yml'
 SYSTEMD_DIR = Path('/etc/systemd/system')
 SERVICE_DIR = BASE_DIR / 'deploy' / 'systemd'
 DEV_SERVICE_DIR = BASE_DIR / 'deploy' / 'systemd-dev'
 
 SERVICES = {
-    'backend': 'bs01-gunicorn.service',
+    'backend': 'bs01-backend.service',
     'web': 'bs01-web.service',
     'admin': 'bs01-admin.service',
     'mobile': 'bs01-mobile.service',
-    'celery': 'bs01-celery.service',
-    'celery-transcode': 'bs01-celery-transcode.service',
-    'celery-beat': 'bs01-celery-beat.service',
 }
-PRODUCTION_TARGETS = ['backend', 'celery', 'celery-transcode', 'celery-beat']
+PRODUCTION_TARGETS = ['backend']
 DEV_TARGETS = ['web', 'admin', 'mobile']
 SERVICE_FILES = {
-    'backend': SERVICE_DIR / 'bs01-gunicorn.service',
-    'celery': SERVICE_DIR / 'bs01-celery.service',
-    'celery-transcode': SERVICE_DIR / 'bs01-celery-transcode.service',
-    'celery-beat': SERVICE_DIR / 'bs01-celery-beat.service',
+    'backend': SERVICE_DIR / 'bs01-backend.service',
     'web': DEV_SERVICE_DIR / 'bs01-web.service',
     'admin': DEV_SERVICE_DIR / 'bs01-admin.service',
     'mobile': DEV_SERVICE_DIR / 'bs01-mobile.service',
@@ -122,15 +124,12 @@ def journalctl(unit: str, lines: int = 200, follow: bool = False) -> int:
 
 
 def ensure_paths():
-    if not VENV_PY.exists():
-        print("[错误] 未找到虚拟环境：", VENV_PY)
-        print("请先创建：python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt")
+    if not (SPRINGBOOT_DIR / 'pom.xml').exists():
+        print("[错误] 未找到 Spring Boot 后端工程：", SPRINGBOOT_DIR / 'pom.xml')
         raise SystemExit(1)
-    if not MANAGE_PY.exists():
-        print("[错误] 未找到 manage.py：", MANAGE_PY)
-        raise SystemExit(1)
-    if not ENV_FILE.exists():
-        print("[警告] 未找到环境文件 .env：", ENV_FILE)
+    if not BACKEND_ENV_FILE.exists():
+        print("[警告] 未找到后端环境文件 .env：", BACKEND_ENV_FILE)
+        print("        生产环境请从 .env.example 复制并按需修改（SPRING_PROFILES_ACTIVE=prod）")
 
 
 def ensure_script(path: Path) -> Path:
@@ -280,42 +279,145 @@ def list_units(targets: list[str]) -> list[str]:
 # ------------------------- 子命令实现 -------------------------
 
 def unit_installed(unit: str) -> bool:
-    return (SYSTEMD_DIR / unit).exists()
+    return (SYSTEMD_DIR / unit).exists() and shutil.which('systemctl') is not None
+
+
+def docker_backend_available() -> bool:
+    return DOCKER_COMPOSE_FILE.exists() and shutil.which('docker') is not None
+
+
+def _dev_backend_pid() -> int | None:
+    """获取开发环境后端进程 PID（优先 pid 文件，其次端口检测）。"""
+    if BACKEND_PID_FILE.exists():
+        try:
+            pid = int(BACKEND_PID_FILE.read_text(encoding='utf-8').strip())
+            if pid and _pid_alive(pid):
+                return pid
+        except Exception:
+            pass
+    rc, out = run_capture(
+        f"ss -tlnp 'sport = :{BACKEND_PORT}' 2>/dev/null | grep -Eo 'pid=[0-9]+' | head -1 | cut -d= -f2",
+        cwd=BASE_DIR,
+    )
+    if rc == 0 and out.strip():
+        try:
+            return int(out.strip())
+        except Exception:
+            pass
+    return None
+
+
+def _dev_backend_running() -> bool:
+    return _dev_backend_pid() is not None
+
+
+def _start_dev_backend() -> None:
+    """以开发模式启动 Spring Boot 后端（mvn spring-boot:run，nohup 后台）。"""
+    if _dev_backend_running():
+        pid = _dev_backend_pid()
+        print(f"[信息] 后端开发进程已在运行 (pid={pid})")
+        return
+    ensure_paths()
+    mvn_mode = "-o"  # 离线优先
+    cmd = (
+        f"cd {shlex.quote(str(SPRINGBOOT_DIR))} && "
+        f"nohup {MAVEN_BIN} {mvn_mode} spring-boot:run "
+        f"-Dspring-boot.run.profiles={DEV_BACKEND_PROFILE} "
+        f"> {shlex.quote(str(BACKEND_LOG_FILE))} 2>&1 & "
+        f"echo $! > {shlex.quote(str(BACKEND_PID_FILE))}"
+    )
+    run(cmd, cwd=SPRINGBOOT_DIR, check=False)
+    print(f"[信息] 后端开发进程已启动，日志：{BACKEND_LOG_FILE}")
+    print("[提示] 等待约 20-40 秒后端就绪，可使用 'status backend' 或 'check' 确认")
+
+
+def _stop_dev_backend() -> None:
+    """停止开发环境后端进程。"""
+    pid = _dev_backend_pid()
+    if not pid:
+        print("[信息] 后端开发进程未运行")
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(f"[信息] 已发送停止信号到后端进程 (pid={pid})")
+        time.sleep(2)
+        if _pid_alive(pid):
+            os.kill(pid, signal.SIGKILL)
+            print(f"[警告] 进程未响应 SIGTERM，已强制终止 (pid={pid})")
+    except ProcessLookupError:
+        print(f"[信息] 进程已退出 (pid={pid})")
+    except Exception as e:
+        print(f"[错误] 停止进程失败 (pid={pid}): {e}")
+    try:
+        BACKEND_PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _handle_unit_or_docker(unit: str, action: str) -> None:
+    """对单个服务执行操作：systemd → docker compose → 开发进程管理。"""
+    if unit_installed(unit):
+        if action == 'status':
+            systemctl(f"status {unit} --no-pager", check=False)
+        elif action == 'start':
+            systemctl(f"enable --now {unit}", check=False)
+        else:
+            systemctl(f"{action} {unit}", check=False)
+        return
+    if docker_backend_available() and unit == SERVICES['backend']:
+        compose_map = {
+            'status': 'docker compose ps backend',
+            'start': 'docker compose up -d backend',
+            'stop': 'docker compose stop backend',
+            'restart': 'docker compose restart backend',
+            'enable': 'docker compose up -d backend',
+            'disable': 'docker compose stop backend',
+        }
+        run(compose_map[action], cwd=BASE_DIR, check=False)
+        return
+    if unit == SERVICES['backend']:
+        if action == 'status':
+            pid = _dev_backend_pid()
+            if pid:
+                print(f"[状态] 后端开发进程运行中 (pid={pid}, 端口 {BACKEND_PORT})")
+            else:
+                print(f"[状态] 后端开发进程未运行 (端口 {BACKEND_PORT} 无监听)")
+        elif action == 'start':
+            _start_dev_backend()
+        elif action == 'stop':
+            _stop_dev_backend()
+        elif action == 'restart':
+            _stop_dev_backend()
+            time.sleep(1)
+            _start_dev_backend()
+        elif action in ('enable', 'disable'):
+            print(f"[提示] enable/disable 仅适用于 systemd 单元，开发进程已跳过。")
+        return
+    print(f"[跳过] 未安装单元：{unit}（可执行 'python3 bs01ctl.py setup-services' 安装生产单元；前端开发单元需加 --include-frontend-dev）")
+
 
 def cmd_status(args):
     units = list_units(args.targets or ['all'])
     for u in units:
-        if unit_installed(u):
-            systemctl(f"status {u} --no-pager", check=False)
-        else:
-            print(f"[跳过] 未安装单元：{u}（可执行 'python3 bs01ctl.py setup-services' 安装生产单元；前端开发单元需加 --include-frontend-dev）")
+        _handle_unit_or_docker(u, 'status')
 
 
 def cmd_start(args):
     units = list_units(args.targets or ['all'])
     for u in units:
-        if unit_installed(u):
-            systemctl(f"enable --now {u}", check=False)
-        else:
-            print(f"[跳过] 未安装单元：{u}（可执行 'python3 bs01ctl.py setup-services' 安装生产单元；前端开发单元需加 --include-frontend-dev）")
+        _handle_unit_or_docker(u, 'start')
 
 
 def cmd_stop(args):
     units = list_units(args.targets or ['all'])
     for u in units:
-        if unit_installed(u):
-            systemctl(f"stop {u}", check=False)
-        else:
-            print(f"[跳过] 未安装单元：{u}")
+        _handle_unit_or_docker(u, 'stop')
 
 
 def cmd_restart(args):
     units = list_units(args.targets or ['all'])
     for u in units:
-        if unit_installed(u):
-            systemctl(f"restart {u}", check=False)
-        else:
-            print(f"[跳过] 未安装单元：{u}")
+        _handle_unit_or_docker(u, 'restart')
 
 
 def cmd_reload(args):
@@ -325,19 +427,13 @@ def cmd_reload(args):
 def cmd_enable(args):
     units = list_units(args.targets or ['all'])
     for u in units:
-        if unit_installed(u):
-            systemctl(f"enable {u}", check=False)
-        else:
-            print(f"[跳过] 未安装单元：{u}")
+        _handle_unit_or_docker(u, 'enable')
 
 
 def cmd_disable(args):
     units = list_units(args.targets or ['all'])
     for u in units:
-        if unit_installed(u):
-            systemctl(f"disable {u}", check=False)
-        else:
-            print(f"[跳过] 未安装单元：{u}")
+        _handle_unit_or_docker(u, 'disable')
 
 
 def _read_pid(pid_path: Path) -> int | None:
@@ -438,19 +534,44 @@ def cmd_uniapp_dev_status(args):
 def cmd_logs(args):
     unit = SERVICES.get(args.target)
     if not unit:
-        print("[错误] 目标应为 backend/web/admin/mobile/celery/celery-transcode/celery-beat 之一")
+        print("[错误] 目标应为 backend/web/admin/mobile 之一")
         raise SystemExit(2)
+    if args.target == 'backend':
+        if unit_installed(unit):
+            pass  # 走下方 journalctl
+        elif docker_backend_available():
+            opt_f = "-f" if args.follow else ""
+            run(f"docker compose logs {opt_f} --tail={int(args.lines)} backend", cwd=BASE_DIR)
+            return
+        else:
+            # 开发环境：直接 tail 日志文件；若无则尝试 pid 文件关联日志
+            log_src = BACKEND_LOG_FILE if BACKEND_LOG_FILE.exists() else None
+            if not log_src:
+                pid = _dev_backend_pid()
+                if pid:
+                    log_src = Path(f'/tmp/terminal_term_*.log')
+                    print(f"[信息] 后端运行中 (pid={pid})，日志由后台终端管理，请使用对应终端日志。")
+                    print(f"        示例：tail -f /tmp/terminal_term_<id>.log")
+                    return
+                else:
+                    print(f"[信息] 后端未运行，无日志可用。")
+                    return
+            opt_f = "-f" if args.follow else ""
+            run(f"tail {opt_f} -n {int(args.lines)} {shlex.quote(str(log_src))}", check=False)
+            return
     journalctl(unit, lines=args.lines, follow=args.follow)
 
 
 def cmd_install(args):
-    """安装依赖（后端 + 前端）。"""
-    # 后端 Python 依赖
-    if not VENV_PY.exists():
-        # 自动创建虚拟环境并升级 pip
-        run("python3 -m venv .venv", cwd=BASE_DIR)
-        run(f"{VENV_PY} -m pip install -U pip", cwd=BASE_DIR)
-    run(f"{VENV_PIP} install -r requirements.txt", cwd=BASE_DIR)
+    """安装依赖（后端 Maven + 前端 npm）。"""
+    if not args.skip_backend:
+        ensure_paths()
+        print("[信息] 安装后端 Maven 依赖（离线优先，失败则在线）...")
+        rc = run(f"{MAVEN_BIN} -f {shlex.quote(str(SPRINGBOOT_DIR / 'pom.xml'))} -B -ntp -o -DskipTests dependency:resolve",
+                 cwd=SPRINGBOOT_DIR, check=False)
+        if rc != 0:
+            run(f"{MAVEN_BIN} -f {shlex.quote(str(SPRINGBOOT_DIR / 'pom.xml'))} -B -ntp -DskipTests dependency:resolve",
+                cwd=SPRINGBOOT_DIR)
     # 前端依赖
     if not args.skip_frontend:
         if (BASE_DIR / 'web-client' / 'package.json').exists():
@@ -587,39 +708,84 @@ def cmd_restore(args):
 
 
 def cmd_migrate(args):
+    """执行 Flyway 数据库迁移（Spring Boot 启动时自动迁移，此处提供显式入口）。"""
     ensure_paths()
-    run(f"{VENV_PY} {MANAGE_PY} migrate", cwd=BASE_DIR)
+    env = parse_env_file(BACKEND_ENV_FILE)
+    overrides = []
+    for key, flag in (('DB_URL', 'flyway.url'), ('DB_USER', 'flyway.user'), ('DB_PASSWORD', 'flyway.password')):
+        if env.get(key):
+            overrides.append(f"-D{flag}={shlex.quote(env[key])}")
+    extra = ' ' + ' '.join(overrides) if overrides else ''
+    run(f"{MAVEN_BIN} -f {shlex.quote(str(SPRINGBOOT_DIR / 'pom.xml'))} -B flyway:migrate{extra}", cwd=SPRINGBOOT_DIR)
 
 
 def cmd_check(args):
-    ensure_paths()
-    run(f"{VENV_PY} {MANAGE_PY} check", cwd=BASE_DIR)
+    """后端健康检查。"""
+    rc, out = run_capture(f"curl -fsS -m 5 {BACKEND_HEALTH_URL}")
+    if rc == 0:
+        print("[健康] 后端运行正常：", out)
+    else:
+        brief = out.splitlines()[-1] if out else "无法连接"
+        print("[错误] 后端健康检查失败：", brief)
+        raise SystemExit(1)
 
 
 def cmd_collectstatic(args):
+    """collectstatic 为 Django 遗留命令，Spring Boot 后端无需收集静态文件。"""
+    print("[错误] collectstatic 为 Django 遗留命令，Spring Boot 后端无需收集静态文件。")
+    print("如需构建后端请执行：python3 bs01ctl.py build-backend")
+    raise SystemExit(2)
+
+
+def cmd_build_backend(args):
+    """构建后端生产 jar（mvn package，跳过测试）。"""
     ensure_paths()
-    run(f"{VENV_PY} {MANAGE_PY} collectstatic --noinput", cwd=BASE_DIR)
+    run(f"{MAVEN_BIN} -f {shlex.quote(str(SPRINGBOOT_DIR / 'pom.xml'))} -B -ntp -DskipTests package", cwd=SPRINGBOOT_DIR)
 
 
 def cmd_test(args):
+    """运行后端测试（mvn test）。label 对应 -Dtest=<label>。"""
     ensure_paths()
+    if args.keepdb:
+        print("[提示] --keepdb 为 Django 遗留参数，Spring Boot 测试无需保留数据库，已忽略。")
     label = args.label or ''
-    keep = ' --keepdb' if args.keepdb else ''
-    run(f"{VENV_PY} {MANAGE_PY} test {label} -v 2{keep}", cwd=BASE_DIR)
+    test_arg = f" -Dtest={shlex.quote(label)}" if label else ""
+    run(f"{MAVEN_BIN} -f {shlex.quote(str(SPRINGBOOT_DIR / 'pom.xml'))} -B -ntp test{test_arg}", cwd=SPRINGBOOT_DIR)
+
+
+def cmd_deploy(args):
+    """docker compose 生产部署（包装 deploy/up.sh）。"""
+    script = ensure_script(BASE_DIR / 'deploy' / 'up.sh')
+    run(f"bash {shlex.quote(str(script))}", cwd=BASE_DIR)
+
+
+def cmd_undeploy(args):
+    """停止并移除 docker compose 生产服务（包装 deploy/down.sh）。"""
+    script = ensure_script(BASE_DIR / 'deploy' / 'down.sh')
+    run(f"bash {shlex.quote(str(script))}", cwd=BASE_DIR)
 
 
 def cmd_doctor(args):
     """基本体检：默认检查生产服务，可选附加前端开发服务。"""
     include_frontend_dev = bool(getattr(args, 'include_frontend_dev', False))
-    env_map = parse_env_file(ENV_FILE)
+    env_map = parse_env_file(BACKEND_ENV_FILE)
     status_targets = ['all']
     if include_frontend_dev:
         status_targets = ['all'] + DEV_TARGETS
     print("[信息] 检查服务状态...")
     cmd_status(argparse.Namespace(targets=status_targets))
     print("\n[信息] 检查关键文件...")
-    for p in [VENV_PY, MANAGE_PY, ENV_FILE]:
-        print("  ✅ 存在" if p.exists() else "  ❌ 不存在", "-", p)
+    backend_pom = SPRINGBOOT_DIR / 'pom.xml'
+    print("  ✅ 存在" if backend_pom.exists() else "  ❌ 不存在", "-", backend_pom)
+    print("  ✅ 存在" if DOCKER_COMPOSE_FILE.exists() else "  ❌ 不存在", "-", DOCKER_COMPOSE_FILE)
+    print("  ⚠️ 未找到" if not BACKEND_ENV_FILE.exists() else "  ✅ 存在", "-", BACKEND_ENV_FILE)
+    target_dir = SPRINGBOOT_DIR / 'target'
+    if target_dir.exists():
+        jars = list(target_dir.glob('*.jar'))
+        suffix = f"（{len(jars)} 个 jar 产物）" if jars else "（无 jar 产物，可执行 build-backend）"
+        print("  ✅ 存在", "-", target_dir, suffix)
+    else:
+        print("  ❌ 不存在", "-", target_dir)
     print("\n[信息] 检查端口连通性...")
     def _probe_tcp(host: str, port: int) -> tuple[str, str]:
         try:
@@ -646,26 +812,9 @@ def cmd_doctor(args):
     if not include_frontend_dev:
         print("  ℹ️ 前端开发端口检查默认跳过；如需检查 8080/8082/5173，请附加 --include-frontend-dev")
 
-    # Show who occupies gunicorn bind port (from config)
-    try:
-        bind_port = 8000
-        cfg = (BASE_DIR / 'backend' / 'gunicorn.conf.py').read_text(encoding='utf-8')
-        for line in cfg.splitlines():
-            s = line.strip()
-            if s.startswith('bind') and ':' in s:
-                # e.g. bind = "0.0.0.0:8000"
-                colon = s.rfind(':')
-                if colon > 0:
-                    tail = s[colon+1:].strip().strip('"\'')
-                    try:
-                        bind_port = int(''.join(ch for ch in tail if ch.isdigit()))
-                    except Exception:
-                        bind_port = 8000
-                break
-        print(f"\n[信息] 端口占用检查（Gunicorn bind: :{bind_port}）...")
-        run(f"ss -ltnp | grep -E ':{bind_port}\\b' || true", check=False)
-    except Exception:
-        pass
+    # Show who occupies backend port
+    print("\n[信息] 端口占用检查（后端 :8000）...")
+    run("ss -ltnp | grep -E ':8000\\b' || true", check=False)
     print("\n[信息] 检查 ffmpeg/ffprobe 可用性...")
     for bin_name in ('ffmpeg', 'ffprobe'):
         path = shutil.which(bin_name)
@@ -674,31 +823,14 @@ def cmd_doctor(args):
         else:
             rc = run(f"{bin_name} -version > /dev/null 2>&1", check=False)
             print(f"  {'✅' if rc == 0 else '❌'} {bin_name} 可执行：{path}")
-    print("\n[信息] 检查 Celery 可用性...")
-    if CELERY_BIN.exists():
-        # 显式指定工作目录与 PYTHONPATH，避免导入 backend 失败导致误报
-        rc_ver, out_ver = run_capture(f"{CELERY_BIN} --version", cwd=BASE_DIR)
-        if rc_ver == 0:
-            version_line = out_ver.splitlines()[0] if out_ver else "unknown"
-            print(f"  ✅ Celery CLI 可执行：{version_line}")
+    print("\n[信息] 检查 docker compose 生产编排可用性...")
+    if DOCKER_COMPOSE_FILE.exists():
+        if shutil.which('docker') is None:
+            print("  ⚠️ 未找到 docker，跳过 compose 服务状态检查。")
         else:
-            brief = out_ver.splitlines()[-1] if out_ver else "未知错误"
-            print(f"  ❌ Celery CLI 执行失败：{brief}")
-
-        # 使用 -A backend（Celery 会在 backend/celery.py 中自动发现 app）
-        py_path = shlex.quote(str(BASE_DIR / 'backend'))
-        rc, out = run_capture(
-            f"PYTHONPATH={py_path} DJANGO_SETTINGS_MODULE=backend.settings "
-            f"{CELERY_BIN} -A backend.celery:app inspect ping -t 2",
-            cwd=BASE_DIR,
-        )
-        if rc == 0:
-            print("  ✅ Celery worker 可响应 ping")
-        else:
-            detail = out.splitlines()[-1] if out else "无输出"
-            print(f"  ❌ Celery worker 未响应 ping：{detail}")
+            run("docker compose ps", cwd=BASE_DIR, check=False)
     else:
-        print("  ❌ 未找到 Celery 可执行文件：", CELERY_BIN)
+        print("  ⚠️ 未找到 docker-compose.yml：", DOCKER_COMPOSE_FILE)
 
     print("\n[信息] CORS 预检自检 (OPTIONS /api/)...")
     def _cors_preflight(origin: str) -> None:
@@ -806,27 +938,33 @@ def cmd_doctor(args):
                 print(f"  尝试对日志中的 Origin 进行预检：{og}")
                 _cors_preflight(og)
     else:
-        print("\n[信息] 已跳过前端开发自检（CORS 预检、Admin 编译状态）。如需检查，请附加 --include-frontend-dev。")
+        print("\n[信息] 已跳过前端开发自检。对后端执行一次基础 CORS 预检...")
+        _cors_preflight("http://localhost:8080")
 
     print("\n[信息] 检查 PostgreSQL 配置与连通性...")
-    db_engine = env_map.get('DB_ENGINE', 'django.db.backends.postgresql')
-    db_host = env_map.get('DB_HOST', '127.0.0.1') or '127.0.0.1'
-    db_port = env_map.get('DB_PORT', '5432') or '5432'
-    db_name = env_map.get('DB_NAME', '')
-    db_user = env_map.get('DB_USER', '')
-    if 'postgresql' not in db_engine:
-        print(f"  ℹ️ 当前 DB_ENGINE={db_engine}，跳过 PostgreSQL 专项检查。")
-    else:
-        if db_name and db_user:
-            print(f"  ℹ️ 目标数据库：{db_user}@{db_host}:{db_port}/{db_name}")
+    db_url = env_map.get('DB_URL', '')
+    if db_url:
+        m = re.search(r'jdbc:postgresql://([^:/]+):(\d+)/([^?]+)', db_url)
+        if m:
+            db_host, db_port, db_name = m.groups()
         else:
-            print("  ⚠️ backend/.env 缺少 DB_NAME 或 DB_USER。")
-        status, msg = _probe_tcp(db_host, int(db_port))
-        icon = "✅" if status == "ok" else ("⚠️" if status == "skip" else "❌")
-        print(f"  {icon} PostgreSQL {msg}")
+            db_host, db_port, db_name = '127.0.0.1', '5432', ''
+        db_user = env_map.get('DB_USER', '')
+    else:
+        db_host = env_map.get('DB_HOST', '127.0.0.1') or '127.0.0.1'
+        db_port = env_map.get('DB_PORT', '5432') or '5432'
+        db_name = env_map.get('DB_NAME', '')
+        db_user = env_map.get('DB_USER', '')
+    if db_name and db_user:
+        print(f"  ℹ️ 目标数据库：{db_user}@{db_host}:{db_port}/{db_name}")
+    else:
+        print("  ⚠️ 环境文件缺少 DB_URL/DB_USER（开发默认 localhost:5432/bs01）。")
+    status, msg = _probe_tcp(db_host, int(db_port))
+    icon = "✅" if status == "ok" else ("⚠️" if status == "skip" else "❌")
+    print(f"  {icon} PostgreSQL {msg}")
 
     print("\n[信息] 检查 Redis 配置与连通性...")
-    redis_url = env_map.get('REDIS_URL') or env_map.get('CELERY_BROKER_URL') or env_map.get('CELERY_RESULT_BACKEND', '')
+    redis_url = env_map.get('REDIS_URL', '')
     if redis_url:
         parsed = urlparse(redis_url)
         redis_host = parsed.hostname or env_map.get('REDIS_HOST', '127.0.0.1')
@@ -926,9 +1064,9 @@ def interactive_menu():
         print("6) 安装依赖")
         print("7) 安装/更新 systemd 服务单元")
         print("8) 数据库迁移")
-        print("9) Django 健康检查")
-        print("10) 收集静态文件")
-        print("11) 运行测试")
+        print("9) 后端健康检查")
+        print("10) 构建后端 jar")
+        print("11) 运行后端测试")
         print("12) 体检")
         print("13) 构建 uni-app H5 生产包")
         print("14) 清理 uni-app 缓存")
@@ -941,6 +1079,8 @@ def interactive_menu():
         print("21) 构建前端生产包")
         print("22) 发布前端静态文件")
         print("23) 安装 Nginx 配置")
+        print("24) docker compose 生产部署")
+        print("25) 停止并移除 docker compose 服务")
         print("0) 退出")
         choice = _prompt("请选择编号", "1")
 
@@ -953,19 +1093,19 @@ def interactive_menu():
         if num == 0:
             break
         elif num == 1:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile'], 'all')
             cmd_status(argparse.Namespace(targets=[tgt]))
         elif num == 2:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile'], 'all')
             cmd_start(argparse.Namespace(targets=[tgt]))
         elif num == 3:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile'], 'all')
             cmd_stop(argparse.Namespace(targets=[tgt]))
         elif num == 4:
-            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], 'all')
+            tgt = _choice("目标服务", ['all', 'backend', 'web', 'admin', 'mobile'], 'all')
             cmd_restart(argparse.Namespace(targets=[tgt]))
         elif num == 5:
-            tgt = _choice("目标服务", ['backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], 'backend')
+            tgt = _choice("目标服务", ['backend', 'web', 'admin', 'mobile'], 'backend')
             lines = _prompt("显示日志行数", "200")
             try:
                 n = int(lines)
@@ -985,9 +1125,9 @@ def interactive_menu():
         elif num == 9:
             cmd_check(argparse.Namespace())
         elif num == 10:
-            cmd_collectstatic(argparse.Namespace())
+            cmd_build_backend(argparse.Namespace())
         elif num == 11:
-            label = _prompt("测试标签(回车默认 apps)", "apps")
+            label = _prompt("测试标签(回车默认全部)", "")
             keep = _yesno("是否保留测试数据库?", 'y')
             cmd_test(argparse.Namespace(label=label, keepdb=keep))
         elif num == 12:
@@ -1033,6 +1173,10 @@ def interactive_menu():
             cmd_deploy_frontend_static(argparse.Namespace())
         elif num == 23:
             cmd_install_nginx_conf(argparse.Namespace(reload=_yesno("安装后是否重载 nginx?", 'y')))
+        elif num == 24:
+            cmd_deploy(argparse.Namespace())
+        elif num == 25:
+            cmd_undeploy(argparse.Namespace())
         else:
             print("[提示] 无效编号，请重试。")
 
@@ -1045,21 +1189,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 服务控制
     for name in ('status', 'start', 'stop', 'restart', 'enable', 'disable'):
-        sp = sub.add_parser(name, help=f"{name} 服务：backend/web/admin/mobile/celery/celery-transcode/celery-beat/all")
+        sp = sub.add_parser(name, help=f"{name} 服务：backend/web/admin/mobile/all")
         sp.add_argument('targets', nargs='*', help="目标服务，默认 all")
         sp.set_defaults(func=globals()[f"cmd_{name}"])
 
     sp = sub.add_parser('reload', help='systemd daemon-reload')
     sp.set_defaults(func=cmd_reload)
 
-    sp = sub.add_parser('logs', help='查看服务日志（使用 journalctl）')
-    sp.add_argument('target', choices=['backend', 'web', 'admin', 'mobile', 'celery', 'celery-transcode', 'celery-beat'], help='目标服务')
+    sp = sub.add_parser('logs', help='查看服务日志（journalctl；后端未装 systemd 时回退 docker compose logs）')
+    sp.add_argument('target', choices=['backend', 'web', 'admin', 'mobile'], help='目标服务')
     sp.add_argument('-n', '--lines', type=int, default=200, help='显示行数，默认 200')
     sp.add_argument('-f', '--follow', action='store_true', help='持续跟随')
     sp.set_defaults(func=cmd_logs)
 
     # 依赖 / 部署
-    sp = sub.add_parser('install', help='安装依赖（后端 + 前端）')
+    sp = sub.add_parser('install', help='安装依赖（后端 Maven + 前端 npm）')
+    sp.add_argument('--skip-backend', action='store_true', help='跳过后端 Maven 依赖安装')
     sp.add_argument('--skip-frontend', action='store_true', help='跳过前端依赖安装')
     sp.set_defaults(func=cmd_install)
 
@@ -1069,6 +1214,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser('build-frontends', help='构建前台与管理端生产包')
     sp.set_defaults(func=cmd_build_frontends)
+
+    sp = sub.add_parser('build-backend', help='构建后端生产 jar（mvn package，跳过测试）')
+    sp.set_defaults(func=cmd_build_backend)
+
+    sp = sub.add_parser('deploy', help='docker compose 生产部署（包装 deploy/up.sh）')
+    sp.set_defaults(func=cmd_deploy)
+
+    sp = sub.add_parser('undeploy', help='停止并移除 docker compose 生产服务（包装 deploy/down.sh）')
+    sp.set_defaults(func=cmd_undeploy)
 
     sp = sub.add_parser('deploy-frontend-static', help='发布前台与管理端静态文件到 /var/www/bs01')
     sp.set_defaults(func=cmd_deploy_frontend_static)
@@ -1107,19 +1261,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--npm-bin', help='覆盖恢复时使用的 npm 路径')
     sp.set_defaults(func=cmd_restore)
 
-    # Django 常用命令
-    sp = sub.add_parser('migrate', help='数据库迁移')
+    # 后端常用命令
+    sp = sub.add_parser('migrate', help='执行 Flyway 数据库迁移')
     sp.set_defaults(func=cmd_migrate)
 
-    sp = sub.add_parser('check', help='Django 健康检查')
+    sp = sub.add_parser('check', help='后端健康检查（GET /api/health/）')
     sp.set_defaults(func=cmd_check)
 
-    sp = sub.add_parser('collectstatic', help='收集静态文件（生产）')
+    sp = sub.add_parser('collectstatic', help='[遗留] Django 收集静态文件（Spring Boot 已不需要）')
     sp.set_defaults(func=cmd_collectstatic)
 
-    sp = sub.add_parser('test', help='运行测试（默认标签为空，可指定 apps）')
-    sp.add_argument('label', nargs='?', help='测试标签，例如 apps 或 apps.users')
-    sp.add_argument('--keepdb', action='store_true', help='保留测试数据库')
+    sp = sub.add_parser('test', help='运行后端测试（mvn test）')
+    sp.add_argument('label', nargs='?', help='测试标签，对应 -Dtest=<label>')
+    sp.add_argument('--keepdb', action='store_true', help='[遗留] Django 参数，已忽略')
     sp.set_defaults(func=cmd_test)
 
     sp = sub.add_parser('doctor', help='体检（默认生产服务，可选附加前端开发服务）')

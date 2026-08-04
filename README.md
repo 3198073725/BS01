@@ -1,6 +1,6 @@
 # VidSprout Monorepo
 
-VidSprout 是一个视频平台 monorepo，包含后端 API、Web 前台、管理后台、移动端和部署脚本。
+VidSprout 是一个视频平台 monorepo，包含双引擎后端（Django / Spring Boot）、Web 前台、管理后台、移动端和部署脚本。
 
 仓库里仍然保留了部分历史命名 `BS01`。当前可以按下面理解：
 
@@ -24,6 +24,8 @@ VidSprout 是一个视频平台 monorepo，包含后端 API、Web 前台、管�
 
 - `backend/`
   Django + DRF + ASGI，提供 API、认证、通知、视频、WebSocket。
+- `backend-springboot/`
+  Spring Boot 3.2 + JPA + Spring Security，双引擎实现，API 契约与 Django 版完全一致。
 - `web-client/`
   Web 前台。
 - `admin-console/`
@@ -39,8 +41,9 @@ VidSprout 是一个视频平台 monorepo，包含后端 API、Web 前台、管�
 
 ## 最近更新
 
+- 新增 Spring Boot 后端引擎，实现与 Django 版完全一致的 API 契约（JWT 鉴权、分片上传、ItemCF 推荐），基于 JVM 并发模型提供更高吞吐量。
 - 新增 AI 审核链路，管理端增加审核视图，后端补充自动审核规则与测试。
-- Web 与移动端的系统配置同步从“仅轮询”升级为“启动拉取 + 系统事件推送 + 前台恢复补拉”。
+- Web 与移动端的系统配置同步从"仅轮询"升级为"启动拉取 + 系统事件推送 + 前台恢复补拉"。
 - 移动端新增维护模式页，`maintenance_mode` 现已对 H5 与打包 App 生效。
 - 根仓库新增 [CHANGELOG.md](/root/BS01/CHANGELOG.md) 记录跨子项目变更。
 

@@ -1,0 +1,21 @@
+[Unit]
+Description=BS01 Backend (Spring Boot)
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__PROJECT_ROOT__/backend-springboot
+Environment=SPRING_PROFILES_ACTIVE=prod
+EnvironmentFile=__PROJECT_ROOT__/backend-springboot/.env
+ExecStart=/usr/bin/java -Xms512m -Xmx1g -jar __PROJECT_ROOT__/backend-springboot/target/vidsprout-backend-1.0.0.jar
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5
+# 媒体与日志目录需可写
+ReadWritePaths=__PROJECT_ROOT__/backend-springboot/media __PROJECT_ROOT__/backend-springboot/logs
+
+[Install]
+WantedBy=multi-user.target

@@ -1,12 +1,12 @@
 [submodule "backend"]
 	path = backend
-	url = git@github.com:3198073725/BS01-backend.git
+	url = https://github.com/3198073725/BS01-backend.git
 [submodule "web-client"]
 	path = web-client
-	url = git@github.com:3198073725/BS01-web-client.git
+	url = https://github.com/3198073725/BS01-web-client.git
 [submodule "admin-console"]
 	path = admin-console
-	url = git@github.com:3198073725/BS01-admin-console.git
+	url = https://github.com/3198073725/BS01-admin-console.git
 [submodule "mobile_uniapp"]
 	path = mobile_uniapp
-	url = git@github.com:3198073725/BS01-MobileApp.git
+	url = https://github.com/3198073725/BS01-MobileApp.git

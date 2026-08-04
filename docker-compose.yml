@@ -1,0 +1,87 @@
+name: vidsprout
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vidsprout}
+      POSTGRES_USER: ${POSTGRES_USER:-vidsprout}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    build:
+      context: ./backend-springboot
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SERVER_PORT: 8000
+      DB_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-vidsprout}
+      DB_USER: ${POSTGRES_USER:-vidsprout}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      JWT_ACCESS_EXPIRATION: ${JWT_ACCESS_EXPIRATION:-604800000}
+      JWT_REFRESH_EXPIRATION: ${JWT_REFRESH_EXPIRATION:-5184000000}
+      MEDIA_ROOT: /app/media
+      CONTACT_EMAIL_TO: ${CONTACT_EMAIL_TO:-}
+      MAIL_HOST: ${MAIL_HOST:-smtp.example.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+    volumes:
+      - mediadata:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "3", "http://localhost:8000/api/health/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/nginx/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      # 启用 HTTPS 时取消注释，并在下方挂载证书目录
+      # - "${HTTPS_PORT:-443}:443"
+    depends_on:
+      backend:
+        condition: service_healthy
+    # 启用 HTTPS 时挂载证书
+    # volumes:
+    #   - ./deploy/nginx/ssl:/etc/nginx/ssl:ro
+
+volumes:
+  pgdata:
+  redisdata:
+  mediadata:

@@ -1,0 +1,66 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: 1
+    locations: classpath:db/migration
+    validate-on-migrate: true
+
+  datasource:
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 15000
+      max-lifetime: 1800000
+      leak-detection-threshold: 60000
+
+  data:
+    redis:
+      password: ${REDIS_PASSWORD:}
+
+server:
+  port: ${SERVER_PORT:8000}
+  forward-headers-strategy: framework
+  error:
+    include-message: always
+    include-stacktrace: never
+
+app:
+  jwt:
+    secret: ${JWT_SECRET}
+    access-token-expiration: ${JWT_ACCESS_EXPIRATION:604800000}
+    refresh-token-expiration: ${JWT_REFRESH_EXPIRATION:5184000000}
+  upload:
+    dir: ${MEDIA_ROOT:/app/media}
+  contact:
+    email-to: ${CONTACT_EMAIL_TO:}
+  rate-limit:
+    enabled: true
+    anonymous: ${RATE_LIMIT_ANON:200}
+    authenticated: ${RATE_LIMIT_AUTH:2000}
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+logging:
+  file:
+    name: ${LOG_FILE:/app/logs/vidsprout.log}
+  logback:
+    rollingpolicy:
+      max-file-size: 50MB
+      max-history: 7
+      total-size-cap: 500MB
+  level:
+    root: INFO
+    com.vidsprout: INFO
+    org.springframework.security: WARN
+    org.hibernate.SQL: WARN
+    org.flywaydb: INFO
