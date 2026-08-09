@@ -1,6 +1,7 @@
 # 大幅缩小 web 服务构建上下文
 **/node_modules
 **/target
+!backend-springboot/target/vidsprout-backend-1.0.0.jar
 **/dist
 **/.git
 backend/

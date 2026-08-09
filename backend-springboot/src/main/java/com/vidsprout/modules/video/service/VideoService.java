@@ -462,15 +462,22 @@ public class VideoService {
         toRemove.forEach(tid -> videoTagRepository.deleteByVideoIdAndTagId(video.getId(), tid));
     }
 
+    private String resolveMediaUrl(String path) {
+        if (path == null || path.isBlank()) return null;
+        if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("//")) return path;
+        if (path.startsWith("/media/")) return path;
+        return "/media/" + path;
+    }
+
     public VideoResponse toVideoResponse(Video video) {
         String base = "/media/";
         VideoResponse r = VideoResponse.builder().id(video.getId()).title(video.getTitle())
                 .description(video.getDescription())
-                .videoUrl(video.getVideoFileF() != null ? base + video.getVideoFileF() : null)
-                .thumbnailUrl(video.getThumbnailF() != null ? base + video.getThumbnailF() : null)
+                .videoUrl(resolveMediaUrl(video.getVideoFileF()))
+                .thumbnailUrl(resolveMediaUrl(video.getThumbnailF()))
                 .hlsMasterUrl(video.getVideoFile() != null ? base + "videos/hls/" + video.getId() + "/master.m3u8" : null)
                 .thumbnailVttUrl(base + "videos/thumbs/" + video.getId() + ".vtt")
-                .lowMp4Url(video.getLowMp4() != null ? base + video.getLowMp4() : null)
+                .lowMp4Url(resolveMediaUrl(video.getLowMp4()))
                 .duration(video.getDuration()).width(video.getWidth()).height(video.getHeight())
                 .fileSize(video.getFileSize()).allowComments(video.getAllowComments())
                 .allowDownload(video.getAllowDownload()).visibility(video.getVisibility())
