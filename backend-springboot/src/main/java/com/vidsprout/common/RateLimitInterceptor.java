@@ -97,11 +97,36 @@ public class RateLimitInterceptor implements HandlerInterceptor {
     }
 
     private String resolveIp(HttpServletRequest request) {
-        String xff = request.getHeader("X-Forwarded-For");
-        if (xff != null && !xff.isEmpty()) {
-            return xff.split(",")[0].trim().toLowerCase();
+        String remote = request.getRemoteAddr();
+        String addr = remote != null ? remote.toLowerCase() : "unknown";
+        // Only trust X-Forwarded-For when the immediate peer is a known proxy (loopback / private range),
+        // and take the LAST value: nginx's $proxy_add_x_forwarded_for appends the real client IP at the end,
+        // while attacker-controlled leading values can be spoofed.
+        if (isTrustedProxy(addr)) {
+            String xff = request.getHeader("X-Forwarded-For");
+            if (xff != null && !xff.isEmpty()) {
+                String[] parts = xff.split(",");
+                String last = parts[parts.length - 1].trim().toLowerCase();
+                if (!last.isEmpty() && !"unknown".equals(last)) {
+                    return last;
+                }
+            }
         }
-        String addr = request.getRemoteAddr();
-        return addr != null ? addr.toLowerCase() : "unknown";
+        return addr;
+    }
+
+    private boolean isTrustedProxy(String addr) {
+        if (addr == null) return false;
+        if (addr.equals("127.0.0.1") || addr.equals("::1") || addr.equals("0:0:0:0:0:0:0:1")) return true;
+        if (addr.startsWith("10.") || addr.startsWith("192.168.")) return true;
+        if (addr.startsWith("172.")) {
+            try {
+                int b = Integer.parseInt(addr.substring(4, addr.indexOf('.')));
+                return b >= 16 && b <= 31;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+        return false;
     }
 }

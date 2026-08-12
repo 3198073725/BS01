@@ -305,7 +305,10 @@ public class VideoService {
         User user = authService.getCurrentUserEntity();
         String uploadId = UUID.randomUUID().toString().replace("-", "");
         String ext = getExtension(request.getFilename());
-        Path sessionDir = Path.of(uploadDir, "uploads", "sessions", uploadId);
+        if (!isAllowedExtension(ext)) {
+            throw new BusinessException("不支持的文件格式");
+        }
+        Path sessionDir = sessionDir(uploadId);
         Path chunksDir = sessionDir.resolve("chunks");
         try {
             Files.createDirectories(chunksDir);
@@ -324,7 +327,22 @@ public class VideoService {
     }
 
     public Map<String, Object> uploadChunk(String uploadId, int index, MultipartFile file) {
-        Path chunkPath = Path.of(uploadDir, "uploads", "sessions", uploadId, "chunks", index + ".part");
+        Path sessionDir = sessionDir(uploadId);
+        if (!Files.exists(sessionDir.resolve("meta.json"))) {
+            throw new ResourceNotFoundException("上传会话不存在");
+        }
+        try {
+            Map<String, Object> meta = objectMapper.readValue(
+                    sessionDir.resolve("meta.json").toFile(), Map.class);
+            User user = authService.getCurrentUserEntityOrNull();
+            String ownerId = meta.get("userId") != null ? meta.get("userId").toString() : null;
+            if (user == null || ownerId == null || !user.getId().toString().equals(ownerId)) {
+                throw new UnauthorizedException("无权操作此上传会话");
+            }
+        } catch (IOException e) {
+            throw new BusinessException("读取会话信息失败");
+        }
+        Path chunkPath = sessionDir.resolve("chunks").resolve(index + ".part");
         try {
             Files.createDirectories(chunkPath.getParent());
             file.transferTo(chunkPath.toFile());
@@ -335,11 +353,16 @@ public class VideoService {
     }
 
     public ChunkUploadStatus getUploadStatus(String uploadId) {
-        Path sessionDir = Path.of(uploadDir, "uploads", "sessions", uploadId);
+        Path sessionDir = sessionDir(uploadId);
         if (!Files.exists(sessionDir)) throw new ResourceNotFoundException("上传会话不存在");
         try {
             Map<String, Object> meta = objectMapper.readValue(
                     sessionDir.resolve("meta.json").toFile(), Map.class);
+            User user = authService.getCurrentUserEntityOrNull();
+            String ownerId = meta.get("userId") != null ? meta.get("userId").toString() : null;
+            if (user == null || ownerId == null || !user.getId().toString().equals(ownerId)) {
+                throw new UnauthorizedException("无权查看此上传会话");
+            }
             long filesize = ((Number) meta.get("filesize")).longValue();
             int chunkSize = ((Number) meta.get("chunkSize")).intValue();
             int total = (int) Math.ceil((double) filesize / chunkSize);
@@ -361,7 +384,7 @@ public class VideoService {
     @Transactional
     public VideoResponse completeChunkUpload(String uploadId, String title, String description, UUID categoryId) {
         User user = authService.getCurrentUserEntity();
-        Path sessionDir = Path.of(uploadDir, "uploads", "sessions", uploadId);
+        Path sessionDir = sessionDir(uploadId);
         if (!Files.exists(sessionDir)) throw new ResourceNotFoundException("上传会话不存在");
         try {
             Map<String, Object> meta = objectMapper.readValue(
@@ -407,8 +430,12 @@ public class VideoService {
 
     @Transactional
     public Map<String, Object> retryTranscode(UUID id) {
+        User user = authService.getCurrentUserEntity();
         Video video = videoRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("视频不存在"));
+        if (!isOwnerOrStaff(video, user)) {
+            throw new UnauthorizedException("无权操作此视频");
+        }
         video.setStatus("processing");
         video.setTranscodeError(null);
         videoRepository.save(video);
@@ -419,8 +446,21 @@ public class VideoService {
         if (file.isEmpty()) throw new BusinessException("未收到文件");
         if (file.getSize() > maxSizeBytes) throw new BusinessException("视频文件过大");
         String ext = getExtension(Objects.requireNonNull(file.getOriginalFilename())).toLowerCase();
-        if (!Arrays.asList(allowedExtensions.split(",")).contains(ext))
-            throw new BusinessException("不支持的文件格式");
+        if (!isAllowedExtension(ext)) throw new BusinessException("不支持的文件格式");
+    }
+
+    private boolean isAllowedExtension(String ext) {
+        if (ext == null) return false;
+        String e = ext.toLowerCase();
+        if (!e.startsWith(".") || e.length() > 8 || !e.matches("\\.\\w+")) return false;
+        return Arrays.asList(allowedExtensions.split(",")).contains(e);
+    }
+
+    private Path sessionDir(String uploadId) {
+        if (uploadId == null || !uploadId.matches("[0-9a-fA-F]{32}")) {
+            throw new BusinessException("非法的上传会话ID");
+        }
+        return Path.of(uploadDir, "uploads", "sessions", uploadId).normalize();
     }
 
     private String getExtension(String filename) {

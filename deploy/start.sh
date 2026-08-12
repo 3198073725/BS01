@@ -22,13 +22,18 @@ sleep 2
 echo "[startup] Redis ready"
 
 echo "[startup] starting Spring Boot..."
-JWT_SECRET=showcase-insecure-jwt-secret-for-demo-only \
+# JWT secret: prefer injected env; otherwise generate a fresh random one per container
+# (the container is stateless, so tokens are invalidated on rebuild anyway).
+JWT_SECRET="${JWT_SECRET:-$(head -c 48 /dev/urandom | base64 | tr -d '[:space:]')}"
+DB_USER="${DB_USER:-bs01}"
+DB_PASSWORD="${DB_PASSWORD:-bs01}"
+JWT_SECRET="$JWT_SECRET" \
 SPRING_PROFILES_ACTIVE=prod \
-DB_URL=jdbc:postgresql://127.0.0.1:5432/bs01 \
-DB_USER=bs01 \
-DB_PASSWORD=bs01 \
+DB_URL="${DB_URL:-jdbc:postgresql://127.0.0.1:5432/bs01}" \
+DB_USER="$DB_USER" \
+DB_PASSWORD="$DB_PASSWORD" \
 REDIS_HOST=127.0.0.1 \
-REDIS_PASSWORD= \
+REDIS_PASSWORD="${REDIS_PASSWORD:-}" \
 java -Xms64m -Xmx128m -XX:MaxRAMPercentage=50.0 -jar /app/app.jar > /app/logs/backend.log 2>&1 &
 APP_PID=$!
 

@@ -1,12 +1,17 @@
 package com.vidsprout.modules.config;
 
 import com.vidsprout.modules.config.service.SystemConfigService;
+import com.vidsprout.modules.user.model.User;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -16,6 +21,20 @@ class SystemConfigServiceTest {
 
     @Autowired
     private SystemConfigService configService;
+
+    @BeforeEach
+    void setUpAdminContext() {
+        User admin = User.builder()
+                .id(UUID.fromString("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"))
+                .username("admin")
+                .email("admin@vidsprout.com")
+                .password("x")
+                .isActive(true)
+                .adminRole("admin")
+                .build();
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(admin, null, admin.getAuthorities()));
+    }
 
     @Test
     void globalConfigReturnsSchemaDefaults() {

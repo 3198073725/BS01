@@ -9,10 +9,17 @@ import org.springframework.stereotype.Component;
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 import java.util.Date;
+import java.util.Set;
 import java.util.UUID;
 
 @Component
 public class JwtUtils {
+
+    private static final Set<String> WEAK_SECRETS = Set.of(
+            "change-me-in-production-use-at-least-256-bits",
+            "changeme", "secret", "password", "12345678",
+            "0123456789abcdef0123456789abcdef"
+    );
 
     private final SecretKey key;
     private final long accessTokenExpiration;
@@ -23,6 +30,13 @@ public class JwtUtils {
                     @Value("${app.jwt.access-token-expiration}") long accessTokenExpiration,
                     @Value("${app.jwt.refresh-token-expiration}") long refreshTokenExpiration,
                     RedisTemplate<String, String> redisTemplate) {
+        if (secret == null || secret.trim().isEmpty() || secret.trim().length() < 32) {
+            throw new IllegalStateException("app.jwt.secret 必须配置且长度不少于 32 字节（通过环境变量 JWT_SECRET 注入）");
+        }
+        String trimmed = secret.trim();
+        if (WEAK_SECRETS.contains(trimmed.toLowerCase())) {
+            throw new IllegalStateException("app.jwt.secret 使用了公开占位符/弱值，禁止启动。请通过环境变量 JWT_SECRET 配置强随机密钥");
+        }
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
         this.accessTokenExpiration = accessTokenExpiration;
         this.refreshTokenExpiration = refreshTokenExpiration;

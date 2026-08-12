@@ -47,7 +47,7 @@ public class SecurityConfig {
                 .requestMatchers("/api/schema/**").permitAll()
                 .requestMatchers("/api/videos/list/**").permitAll()
                 .requestMatchers("/api/recommendation/**").permitAll()
-                .requestMatchers("/api/content/tags/**").permitAll()
+                .requestMatchers(HttpMethod.GET, "/api/content/tags/**").permitAll()
                 .requestMatchers("/api/content/categories/**").permitAll()
                 .requestMatchers("/api/analytics/events/**").permitAll()
                 .requestMatchers("/api/notifications/announcements/**").permitAll()

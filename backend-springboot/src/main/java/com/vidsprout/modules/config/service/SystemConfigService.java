@@ -8,9 +8,12 @@ import com.vidsprout.modules.config.model.ConfigNamespace;
 import com.vidsprout.modules.config.repository.ConfigEntryRepository;
 import com.vidsprout.modules.config.repository.ConfigKeyRepository;
 import com.vidsprout.modules.config.repository.ConfigNamespaceRepository;
+import com.vidsprout.modules.user.model.User;
+import com.vidsprout.modules.user.service.AuthService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,6 +38,7 @@ public class SystemConfigService {
     private final Environment environment;
     private final ObjectMapper objectMapper;
     private final RedisTemplate<String, String> redisTemplate;
+    private final AuthService authService;
 
     @Value("${app.config.cache-ttl-seconds:300}")
     private long cacheTtlSeconds;
@@ -47,13 +51,15 @@ public class SystemConfigService {
                                ConfigEntryRepository entryRepository,
                                Environment environment,
                                ObjectMapper objectMapper,
-                               RedisTemplate<String, String> redisTemplate) {
+                               RedisTemplate<String, String> redisTemplate,
+                               AuthService authService) {
         this.namespaceRepository = namespaceRepository;
         this.keyRepository = keyRepository;
         this.entryRepository = entryRepository;
         this.environment = environment;
         this.objectMapper = objectMapper;
         this.redisTemplate = redisTemplate;
+        this.authService = authService;
     }
 
     public record SettingMeta(String type, String label, Object defaultValue, String help, List<String> options) {
@@ -346,6 +352,7 @@ public class SystemConfigService {
     }
 
     public Map<String, Object> getAdminConfig() {
+        requireAdmin();
         if (cacheTtlSeconds > 0) {
             try {
                 String cached = redisTemplate.opsForValue().get(CACHE_ADMIN);
@@ -364,6 +371,14 @@ public class SystemConfigService {
             }
         }
         return config;
+    }
+
+    private void requireAdmin() {
+        User user = authService.getCurrentUserEntity();
+        String role = user.getAdminRole() != null ? user.getAdminRole() : "";
+        if (!Set.of("admin", "super_admin").contains(role)) {
+            throw new AccessDeniedException("权限不足");
+        }
     }
 
     private Map<String, Object> computeAdminConfig() {
@@ -420,6 +435,7 @@ public class SystemConfigService {
 
     @Transactional
     public Map<String, Object> updateAdminConfig(Map<String, Object> data) {
+        requireAdmin();
         ConfigNamespace ns = getOrCreateNamespace();
         List<String> updatedKeys = new ArrayList<>();
         if (data != null) {

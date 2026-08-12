@@ -1,0 +1,9 @@
+# Local development profile. The JWT secret default below is for local dev only;
+# production must supply JWT_SECRET via environment (application-prod.yml has no default).
+app:
+  jwt:
+    secret: ${JWT_SECRET:local-dev-insecure-secret-do-not-use-in-prod}
+
+logging:
+  level:
+    com.vidsprout: DEBUG

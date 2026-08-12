@@ -101,7 +101,7 @@ public class AuthService {
     public UserProfileResponse getUserProfile(UUID id) {
         User user = userRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("用户不存在"));
-        return toProfileResponse(user);
+        return toProfileResponse(user, isViewingSelf(user.getId()));
     }
 
     public User getCurrentUserEntity() {
@@ -183,7 +183,7 @@ public class AuthService {
     public UserProfileResponse getUserByUsername(String username) {
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ResourceNotFoundException("用户不存在"));
-        return toProfileResponse(user);
+        return toProfileResponse(user, isViewingSelf(user.getId()));
     }
 
     @Transactional
@@ -252,16 +252,17 @@ public class AuthService {
     }
 
     public LoginCodeResponse sendLoginCode(String email) {
-        String cooldownKey = "login_code_cooldown:" + email;
+        String normalized = email != null ? email.trim().toLowerCase() : "";
+        String cooldownKey = "login_code_cooldown:" + normalized;
         String cooldown = redisTemplate.opsForValue().get(cooldownKey);
         if (cooldown != null) {
             return LoginCodeResponse.builder().coolDownSeconds(Integer.parseInt(cooldown)).build();
         }
         String code = String.format("%06d", new SecureRandom().nextInt(1000000));
-        String codeKey = "login_code:" + email;
+        String codeKey = "login_code:" + normalized;
         redisTemplate.opsForValue().set(codeKey, code, Duration.ofMinutes(5));
         redisTemplate.opsForValue().set(cooldownKey, "60", Duration.ofSeconds(60));
-        User user = userRepository.findByEmail(email).orElse(null);
+        User user = userRepository.findByEmail(normalized).orElse(null);
         if (user != null) {
             emailService.sendLoginCodeEmail(email, user.getUsername(), code);
         } else {
@@ -272,13 +273,29 @@ public class AuthService {
 
     @Transactional
     public TokenResponse loginWithCode(String email, String code) {
-        String codeKey = "login_code:" + email;
+        String normalized = email != null ? email.trim().toLowerCase() : "";
+        String failKey = "login_code_fail:" + normalized;
+        String lock = redisTemplate.opsForValue().get("login_code_lock:" + normalized);
+        if (lock != null) {
+            throw new BusinessException("验证码错误次数过多，请15分钟后再试");
+        }
+        String codeKey = "login_code:" + normalized;
         String storedCode = redisTemplate.opsForValue().get(codeKey);
         if (storedCode == null || !storedCode.equals(code)) {
+            String fails = redisTemplate.opsForValue().get(failKey);
+            int count = fails != null ? Integer.parseInt(fails) : 0;
+            count++;
+            if (count >= 5) {
+                redisTemplate.opsForValue().set("login_code_lock:" + normalized, "1", Duration.ofMinutes(15));
+                redisTemplate.delete(failKey);
+                throw new BusinessException("验证码错误次数过多，请15分钟后再试");
+            }
+            redisTemplate.opsForValue().set(failKey, String.valueOf(count), Duration.ofMinutes(15));
             throw new BusinessException("验证码无效或已过期");
         }
         redisTemplate.delete(codeKey);
-        User user = userRepository.findByEmail(email).orElse(null);
+        redisTemplate.delete(failKey);
+        User user = userRepository.findByEmail(normalized).orElse(null);
         if (user == null) {
             user = User.builder()
                     .email(email)
@@ -399,10 +416,22 @@ public class AuthService {
     }
 
     private UserProfileResponse toProfileResponse(User user) {
-        return UserProfileResponse.builder()
+        return toProfileResponse(user, true);
+    }
+
+    private boolean isViewingSelf(UUID targetId) {
+        try {
+            User current = getCurrentUserEntityOrNull();
+            return current != null && current.getId().equals(targetId);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private UserProfileResponse toProfileResponse(User user, boolean self) {
+        UserProfileResponse response = UserProfileResponse.builder()
                 .id(user.getId())
                 .username(user.getUsername())
-                .email(user.getEmail())
                 .nickname(user.getNickname())
                 .bio(user.getBio())
                 .profilePicture(user.getProfilePicture())
@@ -411,10 +440,8 @@ public class AuthService {
                 .location(user.getLocation())
                 .website(user.getWebsite())
                 .isVerified(user.getIsVerified())
-                .isEmailVerified(user.getIsEmailVerified())
                 .isCreator(user.getIsCreator())
                 .privacyMode(user.getPrivacyMode())
-                .adminRole(user.getAdminRole())
                 .followersCount(user.getFollowersCount())
                 .followingCount(user.getFollowingCount())
                 .videoCount(user.getVideoCount())
@@ -423,6 +450,12 @@ public class AuthService {
                 .dateJoined(user.getDateJoined())
                 .lastActive(user.getLastActive())
                 .build();
+        if (self) {
+            response.setEmail(user.getEmail());
+            response.setIsEmailVerified(user.getIsEmailVerified());
+            response.setAdminRole(user.getAdminRole());
+        }
+        return response;
     }
 
     public void updateProfilePicture(String profilePicture, String profilePictureF) {
